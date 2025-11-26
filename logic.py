@@ -88,19 +88,32 @@ def update_feedback_in_db(log_id, status):
 # ==========================================
 # 2. 데이터 및 모델 로드 (기존 동일)
 # ==========================================
+# logic.py 내부의 load_resources 함수
+
 @st.cache_resource
 def load_resources():
+    """모델과 데이터를 메모리에 로드 (캐싱 사용)"""
     w2v = Word2Vec.load("w2v.model")
     d2v = Doc2Vec.load("d2v.model")
     df = pd.read_csv("final_recipe_data.csv")
     df['재료토큰'] = df['재료토큰'].apply(literal_eval)
+    
     with open("stats.pkl", "rb") as f:
         stats = pickle.load(f)
+
     try:
-        price_df = pd.read_csv("price_rank.csv")
+        # [수정됨] encoding='utf-8-sig' 추가 및 컬럼명 공백 제거
+        price_df = pd.read_csv("price_rank.csv", encoding='utf-8-sig')
+        price_df.columns = price_df.columns.str.strip() # 컬럼명 앞뒤 공백 제거 안전장치
         price_map = dict(zip(price_df['ingredient'], price_df['rank']))
     except FileNotFoundError:
+        print("Warning: price_rank.csv 파일을 찾을 수 없습니다. 가격 정보가 표시되지 않습니다.")
         price_map = {}
+    except KeyError as e:
+        # 컬럼명이 여전히 안 맞을 경우를 대비한 에러 처리
+        print(f"Error: price_rank.csv 파일의 컬럼명을 확인해주세요. (Missing key: {e})")
+        price_map = {}
+
     return w2v, d2v, df, stats, price_map
 
 w2v_model, d2v_model, df, stats, price_map = load_resources()
