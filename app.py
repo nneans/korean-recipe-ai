@@ -8,7 +8,7 @@ import logic
 # 1. 페이지 기본 설정
 # -------------------------------------------------------------------------
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
-st.title("🍳 레시피를 부탁해!")
+st.title("🍳 AI 식재료 대체 추천 대시보드")
 
 # -------------------------------------------------------------------------
 # 2. 사이드바 UI (가중치 설정)
@@ -30,7 +30,7 @@ with col_main:
     st.markdown("""
     <div style="background-color: #f0f8ff; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
         <h3 style="margin:0; color:#0066cc;">🍲 AI 한식 재료 대체 추천</h3>
-        <p style="margin:5px 0 0 0;">료가 달라도 맛은 이어지게, 당신의 냉장고에 맞춘 레시피를 추천해드려요!</p>
+        <p style="margin:5px 0 0 0;">요리의 '맥락'을 이해하는 똑똑한 추천 시스템</p>
     </div>
     """, unsafe_allow_html=True)
 
