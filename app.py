@@ -10,7 +10,7 @@ import logic
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
 st.title("🍳 AI 식재료 대체 추천 대시보드")
 
-# [NEW] 이미 투표한 로그 ID를 저장할 집합(Set) 초기화
+# 이미 투표한 로그 ID를 저장할 집합(Set) 초기화
 if 'voted_logs' not in st.session_state:
     st.session_state['voted_logs'] = set()
 
@@ -19,13 +19,11 @@ if 'voted_logs' not in st.session_state:
 # -------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚖️ 가중치 설정")
-    # [Task 1: 기본 가중치 5.0으로 변경] (세 번째 인자가 기본값입니다)
     w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5)
     w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5)
     w_method = st.slider("조리법 통계", 0.0, 5.0, 1.0, 0.5)
     w_cat = st.slider("카테고리 통계", 0.0, 5.0, 1.0, 0.5)
     
-    # [Task 3: 가중치 설명 복구]
     st.divider()
     st.info(f"**현재 수식:**\n({w_w2v}×맛 + {w_d2v}×문맥 + {w_method}×조리 + {w_cat}×분류) / 합계")
 
@@ -45,7 +43,6 @@ with col_main:
     dish_name = st.text_input("🍽️ 요리명 검색", placeholder="예: 김치찌개")
 
     if dish_name:
-        # logic.py에 있는 데이터프레임 사용
         cands = logic.df[logic.df['요리명'] == dish_name]
         if cands.empty:
             cands = logic.df[logic.df['요리명'].str.contains(dish_name, na=False)]
@@ -81,13 +78,16 @@ with col_main:
                     # 3.3 결과 계산 및 표시
                     st.divider()
                     
-                    # -------------------------------------------------
-                    # [핵심 로직] 추천 결과 계산 -> 로그 저장 -> 만족도 버튼 표시
-                    # -------------------------------------------------
-                    
                     # A. 결과 계산 및 추천 리스트 수집
                     final_recommendations = []
                     has_result = False
+
+                    # [NEW] 절감 점수 포맷팅 함수 (공통 사용)
+                    def format_saving(score, is_multi=False):
+                        prefix = "총 " if is_multi else ""
+                        if score > 0: return f"🟢 {prefix}+{score}단계 (절감)"
+                        elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
+                        else: return "⚪ 동일 수준"
 
                     # A-1. 단일 재료 대체 계산
                     if len(targets) == 1:
@@ -98,20 +98,29 @@ with col_main:
                         if not res.empty:
                             has_result = True
                             final_recommendations = res['대체재료'].head(3).tolist()
-                            display_df = res[['대체재료', '최종점수']].copy()
-                            display_df.columns = ['추천재료', '적합도']
+                            
+                            display_df = res[['대체재료', '최종점수', 'saving_score']].copy()
+                            display_df['예상 원가변동'] = display_df['saving_score'].apply(lambda x: format_saving(x, is_multi=False))
+                            display_df = display_df[['대체재료', '최종점수', '예상 원가변동']]
+                            display_df.columns = ['추천재료', '적합도', '예상 원가변동']
+                            
                             st.dataframe(display_df.style.format("{:.1%}", subset=['적합도']).background_gradient(cmap='Greens', subset=['적합도']), use_container_width=True, hide_index=True)
                         else:
                             st.warning("결과 없음")
                             
-                    # A-2. 다중 재료 대체 계산
+                    # A-2. 다중 재료 대체 계산 (원가 변동 합계 표시 추가)
                     elif len(targets) > 1:
                         st.subheader("🧩 최적의 재료 조합 (다중 대체)")
                         multi_res = logic.substitute_multi(recipe_id, targets, stops, w_w2v, w_d2v, w_method, w_cat, beam_width=3)
                         if multi_res:
                             has_result = True
-                            final_recommendations = [", ".join(subs) for subs, score in multi_res]
-                            m_df = pd.DataFrame([(f"{', '.join(subs)}", score) for subs, score in multi_res], columns=['추천 조합', '종합 점수'])
+                            final_recommendations = [", ".join(subs) for subs, score, saving in multi_res]
+
+                            m_df = pd.DataFrame([
+                                (f"{', '.join(subs)}", score, format_saving(saving, is_multi=True)) 
+                                for subs, score, saving in multi_res
+                            ], columns=['추천 조합', '종합 점수', '예상 원가변동 합계'])
+                            
                             st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                         else:
                             st.info("가능한 재료 조합을 찾을 수 없습니다.")
@@ -130,7 +139,6 @@ with col_main:
                         # C. 만족도 평가 버튼 UI
                         if 'current_log_id' in st.session_state and st.session_state['current_log_id']:
                             current_log_id = st.session_state['current_log_id']
-                            # [Task 2: 버튼 잠금 여부 확인] 현재 로그 ID가 이미 투표한 목록에 있는지 확인
                             is_voted = current_log_id in st.session_state['voted_logs']
                             
                             st.write("")
@@ -142,20 +150,18 @@ with col_main:
                             
                             b1, b2, _ = st.columns([0.2, 0.2, 0.6])
                             
-                            # 버튼 클릭 시 logic.py 함수 호출 및 상태 업데이트
-                            # disabled=is_voted 옵션을 통해 이미 투표했으면 버튼 비활성화
                             with b1:
                                 if st.button("👍 만족해요", key="btn_satisfy", use_container_width=True, disabled=is_voted):
                                     if logic.update_feedback_in_db(current_log_id, "satisfy"):
-                                        st.session_state['voted_logs'].add(current_log_id) # 투표 목록에 추가
+                                        st.session_state['voted_logs'].add(current_log_id)
                                         st.toast("감사합니다! 만족(👍)으로 기록되었습니다.")
-                                        st.rerun() # 즉시 새로고침하여 버튼 잠금 적용
+                                        st.rerun()
                             with b2:
                                 if st.button("👎 아쉬워요", key="btn_dissatisfy", use_container_width=True, disabled=is_voted):
                                     if logic.update_feedback_in_db(current_log_id, "dissatisfy"):
-                                        st.session_state['voted_logs'].add(current_log_id) # 투표 목록에 추가
+                                        st.session_state['voted_logs'].add(current_log_id)
                                         st.toast("의견 감사합니다. 불만족(👎)으로 기록되었습니다.")
-                                        st.rerun() # 즉시 새로고침하여 버튼 잠금 적용
+                                        st.rerun()
                     
                     if stops:
                         st.divider()
