@@ -5,7 +5,8 @@ import numpy as np
 from gensim.models import Word2Vec, Doc2Vec
 from ast import literal_eval
 import pickle
-from datetime import datetime
+# [수정] 시간 관련 모듈 추가 임포트
+from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
 # ==========================================
@@ -15,19 +16,31 @@ from supabase import create_client
 def init_supabase():
     """Supabase 클라이언트 연결 초기화"""
     try:
-        # secrets.toml에 [supabase] 섹션이 있어야 합니다.
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
     except Exception as e:
-        # 연결 실패 시 UI에서 처리할 수 있도록 에러를 던집니다.
         raise ConnectionError(f"Supabase 연결 실패: {e}")
 
+# [NEW] 한국 시간(KST) 구하는 헬퍼 함수
+def get_kst_now_iso():
+    """현재 한국 시간을 ISO 8601 형식 문자열로 반환"""
+    # UTC+9 시간대 정의
+    kst_timezone = timezone(timedelta(hours=9))
+    # 현재 한국 시간 구하기
+    now_kst = datetime.now(kst_timezone)
+    # Supabase가 좋아하는 형식(ISO 8601)으로 변환
+    return now_kst.isoformat()
+
 def save_feedback_to_db(feedback_text):
-    """일반 텍스트 피드백 저장"""
+    """일반 텍스트 피드백 저장 (한국 시간 적용)"""
     try:
         supabase = init_supabase()
-        data = {"content": feedback_text}
+        # [수정] 한국 시간 명시적 추가
+        data = {
+            "content": feedback_text,
+            "created_at": get_kst_now_iso()
+        }
         supabase.table("feedback").insert(data).execute()
         return True
     except Exception as e:
@@ -35,19 +48,15 @@ def save_feedback_to_db(feedback_text):
         return False
 
 def save_log_to_db(dish, target, stops, w1, w2, w3, w4, rec_list=None):
-    """
-    사용자 로그 및 추천 결과 저장 (전략 1 구현)
-    - rec_list: 추천된 결과 문자열 리스트 (최대 3개)
-    - 반환값: 저장된 로그의 ID (만족도 평가 연결용)
-    """
+    """사용자 로그 저장 (한국 시간 적용)"""
     try:
         supabase = init_supabase()
         
-        # 추천 결과 상위 3개 추출 (없으면 None)
         r1 = rec_list[0] if rec_list and len(rec_list) > 0 else None
         r2 = rec_list[1] if rec_list and len(rec_list) > 1 else None
         r3 = rec_list[2] if rec_list and len(rec_list) > 2 else None
 
+        # [수정] 한국 시간 명시적 추가
         data = {
             "dish": dish,
             "target": target,
@@ -56,19 +65,20 @@ def save_log_to_db(dish, target, stops, w1, w2, w3, w4, rec_list=None):
             "w_d2v": w2,
             "w_method": w3,
             "w_cat": w4,
-            "rec_1": r1, # 1순위 결과 (단일 재료 또는 조합 문자열)
+            "rec_1": r1,
             "rec_2": r2,
-            "rec_3": r3
+            "rec_3": r3,
+            "created_at": get_kst_now_iso()
         }
-        # insert 후 생성된 데이터의 ID를 반환받습니다.
         response = supabase.table("usage_log").insert(data).execute()
         if response.data and len(response.data) > 0:
-             return response.data[0]['id'] # 로그 ID 반환
+             return response.data[0]['id']
         return None
     except Exception as e:
         print(f"로그 저장 에러: {e}")
         return None
 
+# ... (나머지 코드는 기존과 동일합니다) ...
 def update_feedback_in_db(log_id, status):
     """특정 로그 ID에 대한 만족도(satisfaction) 업데이트"""
     try:
@@ -82,30 +92,20 @@ def update_feedback_in_db(log_id, status):
         return False
 
 # ==========================================
-# 2. 데이터 및 모델 로드
+# 2. 데이터 및 모델 로드 (기존 동일)
 # ==========================================
 @st.cache_resource
 def load_resources():
-    """모델과 데이터를 메모리에 로드 (캐싱 사용)"""
-    # 모델 파일 이름도 맞는지 꼭 확인해주세요!
     w2v = Word2Vec.load("w2v.model")
     d2v = Doc2Vec.load("d2v.model")
-    
-    # [수정됨] 파일명을 사용자가 알려준 'final_recipe_data.csv'로 변경
     df = pd.read_csv("final_recipe_data.csv")
-    
     df['재료토큰'] = df['재료토큰'].apply(literal_eval)
-    
-    # 통계 파일 이름도 맞는지 확인해주세요!
     with open("stats.pkl", "rb") as f:
         stats = pickle.load(f)
-        
     return w2v, d2v, df, stats
 
-# 전역 변수로 사용하기 위해 리소스 로드
 w2v_model, d2v_model, df, stats = load_resources()
 
-# 통계 데이터 풀기
 method_map = stats["method_map"]
 recipes_by_ingredient = stats["recipes_by_ingredient"]
 ing_method_counts = stats["ing_method_counts"]
@@ -115,7 +115,7 @@ total_cat_counts = stats["total_cat_counts"]
 TOTAL_RECIPES = stats["TOTAL_RECIPES"]
 
 # ==========================================
-# 3. 핵심 계산 로직 (유사도, 통계 점수 등)
+# 3. 핵심 계산 로직 (기존 동일)
 # ==========================================
 def cos_sim(vec_a, vec_b):
     norm = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
@@ -127,16 +127,16 @@ def get_stat_score(ingredient, target_key, ing_count_dict, total_count_dict, tot
     ing_target_count = cnts[target_key]
     ing_total_count = sum(cnts.values())
     if ing_total_count < min_count: return 0.0
-    
     prob_ing_context = ing_target_count / ing_total_count
     baseline_prob = total_count_dict[target_key] / total_n
     if baseline_prob == 0: return 0.0
     return prob_ing_context / baseline_prob
 
 # ==========================================
-# 4. 대체 추천 알고리즘 (단일/다중)
+# 4. 대체 추천 알고리즘 (기존 동일)
 # ==========================================
 def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
+    # ... (기존 코드 내용 유지) ...
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
@@ -213,6 +213,7 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
     return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
 
 def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_cat, beam_width=3, result_topn=3):
+    # ... (기존 코드 내용 유지) ...
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
