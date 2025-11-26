@@ -87,18 +87,22 @@ def update_feedback_in_db(log_id, status):
 @st.cache_resource
 def load_resources():
     """모델과 데이터를 메모리에 로드 (캐싱 사용)"""
+    # 모델 파일 이름도 맞는지 꼭 확인해주세요!
     w2v = Word2Vec.load("w2v.model")
     d2v = Doc2Vec.load("d2v.model")
-    df = pd.read_csv("recipe_data.csv")
+    
+    # [수정됨] 파일명을 사용자가 알려준 'final_recipe_data.csv'로 변경
+    df = pd.read_csv("final_recipe_data.csv")
+    
     df['재료토큰'] = df['재료토큰'].apply(literal_eval)
     
+    # 통계 파일 이름도 맞는지 확인해주세요!
     with open("stats.pkl", "rb") as f:
         stats = pickle.load(f)
         
     return w2v, d2v, df, stats
 
 # 전역 변수로 사용하기 위해 리소스 로드
-# (실제 환경에서는 try-except로 감싸는게 좋지만 간결함을 위해 생략)
 w2v_model, d2v_model, df, stats = load_resources()
 
 # 통계 데이터 풀기
@@ -133,7 +137,6 @@ def get_stat_score(ingredient, target_key, ing_count_dict, total_count_dict, tot
 # 4. 대체 추천 알고리즘 (단일/다중)
 # ==========================================
 def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
-    # ... (기존 단일 대체 로직 코드와 동일) ...
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
@@ -210,7 +213,6 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
     return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
 
 def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_cat, beam_width=3, result_topn=3):
-    # ... (기존 다중 대체 로직 코드와 동일) ...
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
