@@ -1,4 +1,4 @@
-# logic.py
+# logic.py (최종 완성본 - 다시 복사하세요)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -335,8 +335,4 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
 
         final_results.append((subs, avg_score, total_saving_score))
         
-<<<<<<< HEAD
     return final_results[:result_topn]
-=======
-    return final_results[:result_topn]
->>>>>>> cebc8bf1be78fe8924a9951fa31abf1982792cc6
