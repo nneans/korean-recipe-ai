@@ -1,4 +1,4 @@
-# logic.py (최종 완성본 - 다시 복사하세요)
+# logic.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,6 +7,23 @@ from ast import literal_eval
 import pickle
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
+
+# ==========================================
+# 0. 환경 설정 및 규칙 정의
+# ==========================================
+
+# [NEW] 가격 등급 산정을 위한 키워드 규칙 정의
+# 상위 등급부터 검사하므로 순서가 중요합니다.
+PRICE_KEYWORD_RULES = [
+    (5, ['소고기', '한우', '채끝', '등심', '안심', '갈비살', '전복', '장어']), # 매우 비쌈
+    (4, ['돼지', '삼겹', '목살', '앞다리', '뒷다리', '갈비', '오리', '낙지', '오징어', '새우', '명란']), # 비쌈
+    (3, ['닭', '치킨', '햄', '소시지', '베이컨', '스팸', '참치', '동원', '어묵', '맛살', '버섯', '치즈']), # 보통
+    (2, ['두부', '순두부', '콩나물', '숙주', '김치', '무', '감자', '고구마', '당근', '호박']), # 저렴
+    (1, ['양파', '대파', '쪽파', '실파', '마늘', '고추', '물', '소금', '설탕', '간장', '소스', '양념', '육수']) # 매우 저렴
+]
+
+# [NEW] 키워드 매칭 예외 단어 (포함되면 키워드 규칙 무시하고 기본값 처리)
+PRICE_RULE_EXCEPTIONS = ['돼지감자', '닭의장풀', '새우젓', '멸치액젓', '다시다']
 
 # ==========================================
 # 1. Supabase DB 연동 및 데이터 저장
@@ -136,6 +153,30 @@ def get_stat_score(ingredient, target_key, ing_count_dict, total_count_dict, tot
     if baseline_prob == 0: return 0.0
     return prob_ing_context / baseline_prob
 
+# [NEW] 하이브리드 가격 등급 추정 함수
+def get_estimated_price_rank(ing_name, price_map):
+    """
+    재료명을 받아 하이브리드 방식으로 가격 등급을 추정합니다.
+    1순위: price_map (CSV 정확 일치)
+    2순위: 키워드 포함 규칙
+    기본값: 3
+    """
+    # 1. CSV 정확 일치 확인
+    if ing_name in price_map:
+        return price_map[ing_name]
+    
+    # 2. 예외 단어 포함 여부 확인
+    if any(exp in ing_name for exp in PRICE_RULE_EXCEPTIONS):
+        return 3 # 예외는 기본값 처리
+
+    # 3. 키워드 포함 규칙 확인
+    for rank, keywords in PRICE_KEYWORD_RULES:
+        if any(kw in ing_name for kw in keywords):
+            return rank
+            
+    # 4. 아무것도 해당 안 되면 기본값 3
+    return 3
+
 # ==========================================
 # 4. 대체 추천 알고리즘 (단일/다중)
 # ==========================================
@@ -154,7 +195,8 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
     if w_d2v > 0 and tag in d2v_model.dv:
         vec_recipe = d2v_model.dv[tag]
 
-    target_rank = price_map.get(target_ing, 3)
+    # [수정] 하이브리드 함수 사용
+    target_rank = get_estimated_price_rank(target_ing, price_map)
         
     candidates_raw = w2v_model.wv.most_similar(target_ing, topn=50)
     temp_results = []
@@ -196,7 +238,8 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
         s_method = 0.0 if w_method <= 0 else get_stat_score(clean_cand, current_method, ing_method_counts, total_method_counts, TOTAL_RECIPES)
         s_cat = 0.0 if w_cat <= 0 else get_stat_score(clean_cand, current_cat, ing_cat_counts, total_cat_counts, TOTAL_RECIPES)
 
-        cand_rank = price_map.get(clean_cand, 3)
+        # [수정] 하이브리드 함수 사용
+        cand_rank = get_estimated_price_rank(clean_cand, price_map)
         saving_score = target_rank - cand_rank
 
         temp_results.append({
@@ -235,10 +278,10 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
     total_weight = w_w2v + w_d2v + w_method + w_cat
     if total_weight == 0: total_weight = 1.0
 
-    # [NEW] 타겟 재료들의 원래 등급 합계 미리 계산
+    # [수정] 하이브리드 함수 사용
     target_ranks_sum = 0
     for t in targets:
-        target_ranks_sum += price_map.get(t, 3)
+        target_ranks_sum += get_estimated_price_rank(t, price_map)
 
     beam = [(0.0, [], initial_context)]
     
@@ -321,15 +364,14 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
         next_beam.sort(key=lambda x: x[0], reverse=True)
         beam = next_beam[:beam_width]
     
-    # Beam Search 종료 후 결과 정리 (절감 총합 계산 추가)
     final_results = []
     for score, subs, _ in beam:
         avg_score = score / len(targets) if targets else 0.0
         
-        # [NEW] 추천된 조합의 등급 합계 및 절감 총합 계산
+        # [수정] 하이브리드 함수 사용
         cand_ranks_sum = 0
         for sub_ing in subs:
-            cand_ranks_sum += price_map.get(sub_ing, 3)
+            cand_ranks_sum += get_estimated_price_rank(sub_ing, price_map)
         
         total_saving_score = target_ranks_sum - cand_ranks_sum
 
