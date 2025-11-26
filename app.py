@@ -2,23 +2,30 @@
 import streamlit as st
 import pandas as pd
 # 우리가 만든 logic.py 파일을 임포트합니다.
-import logic 
+import logic
 
 # -------------------------------------------------------------------------
-# 1. 페이지 기본 설정
+# 1. 페이지 기본 설정 & 세션 상태 초기화
 # -------------------------------------------------------------------------
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
 st.title("🍳 AI 식재료 대체 추천 대시보드")
+
+# [NEW] 이미 투표한 로그 ID를 저장할 집합(Set) 초기화
+if 'voted_logs' not in st.session_state:
+    st.session_state['voted_logs'] = set()
 
 # -------------------------------------------------------------------------
 # 2. 사이드바 UI (가중치 설정)
 # -------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚖️ 가중치 설정")
-    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 1.0, 0.5)
+    # [Task 1: 기본 가중치 5.0으로 변경] (세 번째 인자가 기본값입니다)
+    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5)
     w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5)
     w_method = st.slider("조리법 통계", 0.0, 5.0, 1.0, 0.5)
     w_cat = st.slider("카테고리 통계", 0.0, 5.0, 1.0, 0.5)
+    
+    # [Task 3: 가중치 설명 복구]
     st.divider()
     st.info(f"**현재 수식:**\n({w_w2v}×맛 + {w_d2v}×문맥 + {w_method}×조리 + {w_cat}×분류) / 합계")
 
@@ -79,79 +86,76 @@ with col_main:
                     # -------------------------------------------------
                     
                     # A. 결과 계산 및 추천 리스트 수집
-                    final_recommendations = [] # DB에 저장할 최종 추천 결과 리스트
+                    final_recommendations = []
                     has_result = False
 
                     # A-1. 단일 재료 대체 계산
                     if len(targets) == 1:
                         st.subheader("🔹 단일 재료 대체 추천")
                         t = targets[0]
-                        # logic.py의 함수 호출
                         res = logic.substitute_single(recipe_id, t, stops, w_w2v, w_d2v, w_method, w_cat, topn=5)
                         st.markdown(f"**{t}** 대체 결과")
                         if not res.empty:
                             has_result = True
-                            # 상위 3개 결과를 추천 리스트에 추가
                             final_recommendations = res['대체재료'].head(3).tolist()
-                            
-                            # 결과 데이터프레임 표시
                             display_df = res[['대체재료', '최종점수']].copy()
                             display_df.columns = ['추천재료', '적합도']
                             st.dataframe(display_df.style.format("{:.1%}", subset=['적합도']).background_gradient(cmap='Greens', subset=['적합도']), use_container_width=True, hide_index=True)
                         else:
                             st.warning("결과 없음")
                             
-                    # A-2. 다중 재료 대체 계산 (타겟이 2개 이상일 때만)
+                    # A-2. 다중 재료 대체 계산
                     elif len(targets) > 1:
                         st.subheader("🧩 최적의 재료 조합 (다중 대체)")
-                        # logic.py의 함수 호출
                         multi_res = logic.substitute_multi(recipe_id, targets, stops, w_w2v, w_d2v, w_method, w_cat, beam_width=3)
-                        
                         if multi_res:
                             has_result = True
-                            # 결과물 형태: [(['재료1', '재료2'], 점수), ...]
-                            # 이를 문자열 조합 리스트로 변환하여 추천 리스트에 추가
                             final_recommendations = [", ".join(subs) for subs, score in multi_res]
-
-                            # 결과 데이터프레임 표시
                             m_df = pd.DataFrame([(f"{', '.join(subs)}", score) for subs, score in multi_res], columns=['추천 조합', '종합 점수'])
                             st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                         else:
                             st.info("가능한 재료 조합을 찾을 수 없습니다.")
 
-                    # B. 로그 저장 및 ID 기억 (결과가 있을 때만)
+                    # B. 로그 저장 및 ID 기억
                     if has_result:
-                        # 현재 상태 정의 (중복 저장 방지용)
-                        # 가중치나 추천 결과가 바뀌면 새로운 상태로 인식
                         current_state = f"{dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recommendations}"
-                        
                         if 'last_log_state' not in st.session_state: st.session_state['last_log_state'] = ""
                             
                         # 상태가 변했을 때만 DB에 저장
                         if st.session_state['last_log_state'] != current_state:
-                            # logic.py의 저장 함수 호출하고 로그 ID 받아오기
                             log_id = logic.save_log_to_db(dish_name, target_str, stops, w_w2v, w_d2v, w_method, w_cat, rec_list=final_recommendations)
-                            
-                            # 세션에 현재 로그 ID 저장 (만족도 버튼용)
                             st.session_state['current_log_id'] = log_id
                             st.session_state['last_log_state'] = current_state
                         
-                        # C. 만족도 평가 버튼 UI (전략 1: 전체 결과에 대한 단일 평가)
+                        # C. 만족도 평가 버튼 UI
                         if 'current_log_id' in st.session_state and st.session_state['current_log_id']:
-                            st.write("") # 여백
-                            st.markdown("##### 🤔 추천 결과가 만족스러우신가요?")
-                            st.caption("이 피드백은 더 똑똑한 AI를 만드는 데 사용됩니다.")
+                            current_log_id = st.session_state['current_log_id']
+                            # [Task 2: 버튼 잠금 여부 확인] 현재 로그 ID가 이미 투표한 목록에 있는지 확인
+                            is_voted = current_log_id in st.session_state['voted_logs']
+                            
+                            st.write("")
+                            if is_voted:
+                                st.success("✅ 이미 평가하셨습니다. 감사합니다!")
+                            else:
+                                st.markdown("##### 🤔 추천 결과가 만족스러우신가요?")
+                                st.caption("이 피드백은 더 똑똑한 AI를 만드는 데 사용됩니다.")
                             
                             b1, b2, _ = st.columns([0.2, 0.2, 0.6])
-                            # 버튼 클릭 시 logic.py의 업데이트 함수 호출
+                            
+                            # 버튼 클릭 시 logic.py 함수 호출 및 상태 업데이트
+                            # disabled=is_voted 옵션을 통해 이미 투표했으면 버튼 비활성화
                             with b1:
-                                if st.button("👍 만족해요", key="btn_satisfy", use_container_width=True):
-                                    if logic.update_feedback_in_db(st.session_state['current_log_id'], "satisfy"):
+                                if st.button("👍 만족해요", key="btn_satisfy", use_container_width=True, disabled=is_voted):
+                                    if logic.update_feedback_in_db(current_log_id, "satisfy"):
+                                        st.session_state['voted_logs'].add(current_log_id) # 투표 목록에 추가
                                         st.toast("감사합니다! 만족(👍)으로 기록되었습니다.")
+                                        st.rerun() # 즉시 새로고침하여 버튼 잠금 적용
                             with b2:
-                                if st.button("👎 아쉬워요", key="btn_dissatisfy", use_container_width=True):
-                                    if logic.update_feedback_in_db(st.session_state['current_log_id'], "dissatisfy"):
+                                if st.button("👎 아쉬워요", key="btn_dissatisfy", use_container_width=True, disabled=is_voted):
+                                    if logic.update_feedback_in_db(current_log_id, "dissatisfy"):
+                                        st.session_state['voted_logs'].add(current_log_id) # 투표 목록에 추가
                                         st.toast("의견 감사합니다. 불만족(👎)으로 기록되었습니다.")
+                                        st.rerun() # 즉시 새로고침하여 버튼 잠금 적용
                     
                     if stops:
                         st.divider()
@@ -171,7 +175,6 @@ with st.form("feedback_form"):
     
     if submitted:
         if text:
-            # logic.py의 함수 호출
             if logic.save_feedback_to_db(text):
                 st.success("소중한 의견 감사합니다! 개발자가 확인 후 반영하겠습니다.")
                 st.balloons()
