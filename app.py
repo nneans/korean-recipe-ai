@@ -5,6 +5,31 @@ import logic
 import os
 from datetime import datetime, timedelta, timezone
 
+# [NEW] 실시간 접속자 확인을 위한 비공개 모듈 임포트 (주의: 스트림릿 내부 API임)
+try:
+    from streamlit.web.server.server import Server
+except ImportError:
+    # 로컬 개발 환경 등 일부 환경에서는 경로가 다를 수 있음
+    from streamlit.server.server import Server
+
+# -------------------------------------------------------------------------
+# 0. (헬퍼 함수) 현재 접속자 수 계산하기
+# -------------------------------------------------------------------------
+def get_active_user_count():
+    """
+    [주의] 이 함수는 Streamlit의 비공개 API를 사용하여 현재 활성화된 세션 수를 계산합니다.
+    향후 Streamlit 버전 업데이트에 따라 작동하지 않을 수 있습니다.
+    """
+    try:
+        current_server = Server.get_current()
+        # _session_info_by_id는 현재 연결된 세션 정보를 담고 있는 비공개 속성입니다.
+        session_infos = current_server._session_info_by_id
+        return len(session_infos)
+    except Exception as e:
+        # 서버 환경에 따라 접근이 불가능할 경우 예외 처리
+        # print(f"접속자 수 확인 실패: {e}") # 디버깅용
+        return "N/A" # 표시할 수 없음
+
 # -------------------------------------------------------------------------
 # 1. 페이지 기본 설정 & 세션 상태 초기화 & 다이얼로그 함수 정의
 # -------------------------------------------------------------------------
@@ -137,15 +162,20 @@ with st.sidebar:
     stopwords_list = logic.load_global_stopwords()
     stopwords_count = len(stopwords_list)
 
+    # [NEW] 현재 접속자 수 계산
+    active_users = get_active_user_count()
+
     tab_today, tab_all = st.tabs(["📅 오늘", "📈 누적"])
 
     with tab_today:
         st.caption(f"기준일: {today_date_string} (KST)")
         today_count, today_dishes, today_targets = logic.get_usage_stats(timeframe='today')
         
-        col_m1_t, col_m2_t = st.columns(2)
-        col_m1_t.metric("오늘 사용량", f"{today_count}건", help="오늘(00시~현재) 발생한 추천 요청 횟수입니다.")
-        col_m2_t.metric("누적 불용어", f"{stopwords_count}개", help="현재까지 등록된 전체 불용어 개수입니다.")
+        # [MODIFIED] 접속자 수 메트릭 추가
+        col_m1_t, col_m2_t, col_m3_t = st.columns(3)
+        col_m1_t.metric("현재 접속자", f"{active_users}명", help="현재 이 앱에 접속해 있는 실시간 사용자 수입니다. (새로고침 시 갱신)")
+        col_m2_t.metric("오늘 사용량", f"{today_count}건", help="오늘(00시~현재) 발생한 추천 요청 횟수입니다.")
+        col_m3_t.metric("누적 불용어", f"{stopwords_count}개", help="현재까지 등록된 전체 불용어 개수입니다.")
 
         if today_count > 0:
             st.caption("🔥 오늘 인기 검색어 Top 5")
@@ -163,6 +193,7 @@ with st.sidebar:
         st.caption("서비스 시작 이후 전체 데이터")
         all_count, all_dishes, all_targets = logic.get_usage_stats(timeframe='all')
         
+        # 누적 탭에서는 접속자 수가 굳이 필요 없어서 뺍니다.
         col_m1_a, col_m2_a = st.columns(2)
         col_m1_a.metric("총 사용량", f"{all_count}건", help="서비스 시작 이후 누적된 총 추천 요청 횟수입니다.")
 
@@ -242,7 +273,7 @@ with col_main:
                 
                 c1, c2 = st.columns(2)
                 with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
-                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
+                with c2: stop_str = st.text_input("🚫 제거할 문구 (임시)", placeholder="약간, 시판용")
                 
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
