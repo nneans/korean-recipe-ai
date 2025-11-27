@@ -391,6 +391,8 @@ with col_main:
                                     b2_c.button("👎 아쉬워요", key="btn_dis_custom", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id_c, "dissatisfy"), st.session_state['voted_logs'].add(cl_id_c), st.toast("의견 감사합니다.")))
         else: st.info("👆 전체 재료 리스트를 먼저 입력해주세요.")
 
+# app.py (하단 부분만 교체)
+
 # -------------------------------------------------------------------------
 # 4. 하단 피드백 및 불용어 신고 영역
 # -------------------------------------------------------------------------
@@ -407,28 +409,37 @@ with col_feedback:
                 if logic.save_feedback_to_db(text): st.success("의견 감사합니다!"); st.balloons()
             else: st.warning("내용을 입력해주세요.")
 
+# [NEW] 불용어 제출 처리 콜백 함수 정의
+def handle_stopword_submission():
+    # 1. 세션 상태에서 현재 입력된 값 가져오기
+    current_input = st.session_state.get("stopword_input_field", "")
+    
+    if current_input:
+        # 2. DB 저장 로직 실행
+        is_success, msg = logic.save_stopwords_to_db(current_input)
+        
+        if is_success:
+            # 성공 시 토스트 메시지 표시 및 입력창 초기화
+            st.toast(msg, icon="✅")
+            st.session_state["stopword_input_field"] = ""
+        else:
+            # 실패 시 토스트 메시지 표시 (입력창 내용 유지)
+            st.toast(msg, icon="❌")
+    else:
+        st.toast("단어를 입력해주세요.", icon="⚠️")
+
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
     st.caption(
         "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
         help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
     )
-    # [NEW] 'or' 관련 안내 문구 추가
     st.info("💡 Tip: '간장or진간장' 같은 경우 'or'를 신고하면 '간장진간장'으로 합쳐져 추천에서 제외됩니다.")
     
     with st.form("stopword_form"):
-        # [MODIFIED] 입력 필드에 키 할당 및 세션 상태 값 연결
-        stopword_input = st.text_input("신고할 단어 입력 (쉼표로 구분)", placeholder="예: 면포, 황석어젓, 텃밭", key="stopword_input_field")
-        submitted_stop = st.form_submit_button("신고하기", use_container_width=True)
-        if submitted_stop:
-            if stopword_input:
-                # [MODIFIED] 다중 불용어 처리 함수 호출
-                is_success, msg = logic.save_stopwords_to_db(stopword_input)
-                if is_success:
-                    st.success(msg)
-                    # [NEW] 성공 시 입력 필드 초기화 (다음 렌더링에 반영)
-                    st.session_state["stopword_input_field"] = ""
-                else:
-                    st.error(msg)
-            else:
-                st.warning("단어를 입력해주세요.")
+        # 입력 필드 (key 연결)
+        st.text_input("신고할 단어 입력 (쉼표로 구분)", placeholder="예: 면포, 황석어젓, 텃밭", key="stopword_input_field")
+        
+        # [MODIFIED] 제출 버튼에 on_click 콜백 연결
+        # 버튼이 클릭되면 handle_stopword_submission 함수가 먼저 실행됩니다.
+        st.form_submit_button("신고하기", use_container_width=True, on_click=handle_stopword_submission)
