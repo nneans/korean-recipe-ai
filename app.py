@@ -4,7 +4,7 @@ import pandas as pd
 import logic
 
 # -------------------------------------------------------------------------
-# 1. 페이지 기본 설정 & 세션 상태 초기화
+# 1. 페이지 기본 설정 & 세션 상태 초기화 & 다이얼로그 함수 정의
 # -------------------------------------------------------------------------
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
 st.title("🍳 AI 식재료 대체 추천 대시보드")
@@ -18,63 +18,110 @@ def format_saving(score, is_multi=False):
     elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
     else: return "⚪ 동일 수준"
 
-# -------------------------------------------------------------------------
-# 2. 사이드바 UI
-# -------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚖️ 가중치 설정")
-    st.info("💡 커스텀 모드(Ver.2)에서는 '맛'과 '문맥' 점수만 반영됩니다.")
-    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5)
-    w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5)
-    w_method = st.slider("조리법 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5)
-    w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5)
-    st.divider()
-    st.caption("**[Ver.1 DB 모드 수식]**\n(맛+문맥+조리+분류) / 합계")
-    st.caption("**[Ver.2 커스텀 모드 수식]**\n(맛+문맥) / 합계 (통계 점수 제외)")
-    st.divider()
-    with st.expander("❓ 어떤 과정을 거쳐 추천되나요?", expanded=False):
-        st.markdown("""
-        ### 🧠 AI 추천 로직 3단계
-        **1. 재료의 '의미' 파악 (Word2Vec)**: 재료 간의 맛, 성질 유사도를 분석합니다.
-        **2. 요리의 '맥락' 이해 (Doc2Vec)**: 현재 요리 문맥에 어울리는지 판단합니다.
-        **3. 통계적 적합성 (Ver.1 전용)**: 실제 레시피 데이터 통계를 활용합니다.
-        ---
-        **💰 예상 원가 변동**: 재료별 상대적 가격 등급(1~5단계)을 기반으로 계산됩니다.
-        """)
+# [NEW] 로직 설명 팝업창 (다이얼로그) 함수 정의
+@st.dialog("🧠 AI 추천 알고리즘 작동 원리")
+def show_logic_dialog():
+    st.markdown("""
+    본 서비스는 자연어 처리(NLP) 기술을 활용하여 단순히 이름이 비슷한 재료가 아닌, **'의미'와 '맥락'이 통하는 최적의 대체 재료**를 찾아냅니다.
+    """)
+    
+    # Mermaid 다이어그램 (도식화)
+    st.markdown("""
+    ```mermaid
+    graph TD
+        A[시작: 타겟 재료 & 요리 문맥 입력] --> B{모드 선택};
+        B -- Ver.1 DB 검색 --> C1[1. 의미 파악 (Word2Vec)];
+        C1 --> C2[2. 문맥 이해 (Doc2Vec)];
+        C2 --> C3[3. 통계적 적합성 (조리법/카테고리)];
+        C3 --> E[가중치 적용 및 종합 점수 계산];
+        
+        B -- Ver.2 커스텀 --> D1[1. 의미 파악 (Word2Vec)];
+        D1 --> D2[2. 문맥 이해 (Doc2Vec)];
+        D2 --> E;
+        
+        E --> F[최종 대체 재료 추천 목록];
+        F --> G[+ 예상 원가 변동 (가격 등급 비교)];
+    ```
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    ---
+    #### **주요 기술 설명**
+    
+    **1. 의미 파악 (Word2Vec)**
+    * 수십만 개의 레시피를 학습하여 재료 간의 의미적 유사성을 파악합니다.
+    * *예: '돼지고기'는 '소고기', '스팸'과 성질이 비슷하다.*
+
+    **2. 문맥 이해 (Doc2Vec)**
+    * 현재 요리의 전체적인 재료 구성(문맥)을 벡터화하여, 그 문맥에 자연스럽게 어울리는지 판단합니다.
+    * *예: '미역국' 문맥에는 '스팸'보다 '조개'가 더 어울린다.*
+
+    **3. 통계적 적합성 (Ver.1 전용)**
+    * 실제 데이터베이스에서 해당 조리법(예: 끓이기)이나 카테고리(예: 국/탕)에 해당 재료가 얼마나 자주 사용되는지 통계적으로 분석합니다.
+    """)
 
 # -------------------------------------------------------------------------
-# 3. 메인 UI (탭 구성)
+# 2. 사이드바 UI (모드 선택 및 가중치 설정)
+# -------------------------------------------------------------------------
+with st.sidebar:
+    st.header("🎛️ 컨트롤 패널")
+    
+    # [NEW] 모드 선택 라디오 버튼 (탭 대신 사용)
+    selected_mode = st.radio(
+        "모드 선택",
+        ["📚 Ver.1 기존 레시피 DB 검색", "✨ Ver.2 나만의 재료 입력 (커스텀)"],
+        index=0
+    )
+    st.divider()
+
+    st.subheader("⚖️ 가중치 설정")
+    
+    # 모드에 따라 슬라이더 활성/비활성 상태 결정
+    is_v1 = selected_mode == "📚 Ver.1 기존 레시피 DB 검색"
+    
+    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5, help="재료 자체의 의미적 유사도 비중입니다.")
+    w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5, help="전체 재료 조합과의 어울림 비중입니다.")
+    
+    # [NEW] Ver.1이 아닐 경우 슬라이더 비활성화 (disabled=True)
+    w_method = st.slider("조리법 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
+    w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
+
+    if not is_v1:
+        st.caption("💡 커스텀 모드에서는 통계 가중치가 적용되지 않습니다.")
+
+    st.divider()
+    # [NEW] 팝업 띄우는 버튼
+    if st.button("❓ 추천 로직 자세히 보기 (팝업)", use_container_width=True):
+        show_logic_dialog()
+
+# -------------------------------------------------------------------------
+# 3. 메인 UI (선택된 모드에 따라 내용 표시)
 # -------------------------------------------------------------------------
 col_main, _ = st.columns([0.9, 0.1])
 with col_main:
-    tab_db, tab_custom = st.tabs(["📚 Ver.1 기존 레시피 DB 검색", "✨ Ver.2 나만의 재료 입력 (커스텀)"])
 
     # =========================================
-    # [Tab 1] Ver.1 기존 레시피 DB 검색 모드
+    # [MODE 1] Ver.1 기존 레시피 DB 검색 모드
     # =========================================
-    with tab_db:
+    if selected_mode == "📚 Ver.1 기존 레시피 DB 검색":
         st.markdown("""<div style="background-color: #f0f8ff; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#0066cc;">[Ver.1] 레시피 데이터베이스에서 검색</h4><p style="margin:5px 0 0 0; font-size:14px;">학습된 12만여 개의 레시피 중 하나를 선택하여 분석합니다. 모든 통계 점수가 활용됩니다.</p></div>""", unsafe_allow_html=True)
         
-        # 1. 검색 키워드 입력
-        search_keyword = st.text_input("🍽️ 요리명 검색 (키워드 입력 후 엔터)", placeholder="예: 된장", key="tab1_search_keyword")
+        search_keyword = st.text_input("🍽️ 요리명 검색 (키워드 입력 후 엔터)", placeholder="예: 된장")
         final_dish_name = None
 
         if search_keyword:
-            # 2. 연관 요리명 찾기
             candidates = logic.df[logic.df['요리명'].str.contains(search_keyword, na=False, case=False)]
             candidate_names = candidates['요리명'].unique().tolist()
             
             if not candidate_names:
                 st.warning(f"🔍 '{search_keyword}'가 포함된 요리명을 찾을 수 없습니다.")
             else:
-                # 3. 선택 상자 표시
                 candidate_names = sorted(candidate_names)[:30]
                 options = ["👇 정확한 요리명을 선택해주세요"] + candidate_names
-                selected_option = st.selectbox(f"🔎 '{search_keyword}' 검색 결과 ({len(candidate_names)}개 발견)", options, key="tab1_candidate_select")
+                selected_option = st.selectbox(f"🔎 '{search_keyword}' 검색 결과 ({len(candidate_names)}개 발견)", options)
                 if selected_option != options[0]:
                     final_dish_name = selected_option
 
-        # 4. 레시피 선택 및 분석
         if final_dish_name:
             st.success(f"✅ 선택된 요리: **{final_dish_name}**")
             cands = logic.df[logic.df['요리명'] == final_dish_name]
@@ -88,12 +135,12 @@ with col_main:
                     preview_text = ing_sum[:100] + "..." if len(ing_sum) > 100 else ing_sum
                     label = f"[{r['요리방법별명']}] {r['요리명']} (ID:{r['레시피일련번호']}) - {preview_text}"
                     options[label] = r['레시피일련번호']
-                selected_label = st.selectbox("📜 분석할 레시피를 선택하세요", list(options.keys()), key="tab1_recipe")
+                selected_label = st.selectbox("📜 분석할 레시피를 선택하세요", list(options.keys()))
                 recipe_id = options[selected_label]
                 
                 c1, c2 = st.columns(2)
-                with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파", key="tab1_target")
-                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용", key="tab1_stop")
+                with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
+                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
                 
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
@@ -143,47 +190,36 @@ with col_main:
                                     b2.button("👎 아쉬워요", key="btn_dis_db", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id, "dissatisfy"), st.session_state['voted_logs'].add(cl_id), st.toast("의견 감사합니다.")))
 
     # =========================================
-    # [Tab 2] Ver.2 커스텀 재료 입력 모드 (수정됨!)
+    # [MODE 2] Ver.2 커스텀 재료 입력 모드
     # =========================================
-    with tab_custom:
+    elif selected_mode == "✨ Ver.2 나만의 재료 입력 (커스텀)":
         st.markdown("""<div style="background-color: #fff5f0; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#cc5500;">[Ver.2] 나만의 재료 리스트 입력</h4><p style="margin:5px 0 0 0; font-size:14px;">냉장고 속 재료들을 직접 입력하세요. 문맥을 실시간으로 분석하여 추천합니다. (통계 점수 제외)</p></div>""", unsafe_allow_html=True)
         
-        # [NEW] Ver.2 요리명 입력란에 자동완성 기능 적용
         st.markdown("##### 🏷️ 요리명 입력 (참고용)")
-        search_keyword_v2 = st.text_input("키워드 입력 후 엔터 (예: 볶음밥) - 선택사항", key="tab2_search_keyword")
-        
-        custom_dish_name = search_keyword_v2 # 기본값: 입력한 키워드 그대로 사용
+        search_keyword_v2 = st.text_input("키워드 입력 후 엔터 (예: 볶음밥) - 선택사항", key="v2_search")
+        custom_dish_name = search_keyword_v2
 
         if search_keyword_v2:
-            # DB에서 연관된 요리명 찾기
             candidates_v2 = logic.df[logic.df['요리명'].str.contains(search_keyword_v2, na=False, case=False)]
             candidate_names_v2 = candidates_v2['요리명'].unique().tolist()
-            
             if candidate_names_v2:
                 candidate_names_v2 = sorted(candidate_names_v2)[:30]
-                # 직접 입력한 내용을 그대로 쓸 수 있는 옵션을 가장 위에 추가
                 options_v2 = ["(직접 입력한 이름 사용)"] + candidate_names_v2
-                selected_option_v2 = st.selectbox(
-                    f"💡 관련 요리명 발견 ({len(candidate_names_v2)}개)", 
-                    options_v2, 
-                    key="tab2_candidate_select"
-                )
-                # 선택박스에서 무언가를 선택했다면 그것을 요리명으로 사용
+                selected_option_v2 = st.selectbox(f"💡 관련 요리명 발견 ({len(candidate_names_v2)}개)", options_v2, key="v2_select")
                 if selected_option_v2 != options_v2[0]:
                     custom_dish_name = selected_option_v2
 
-        st.write("") # 간격 띄우기
-        context_str = st.text_area("📝 전체 재료 리스트 (쉼표로 구분)", placeholder="예: 밥, 계란, 대파, 간장, 참기름", key="tab2_context", height=100)
+        st.write("")
+        context_str = st.text_area("📝 전체 재료 리스트 (쉼표로 구분)", placeholder="예: 밥, 계란, 대파, 간장, 참기름", height=100, key="v2_context")
 
-        # (이하 커스텀 모드 로직은 기존과 동일)
         if context_str:
             context_ings_list = [ing.strip() for ing in context_str.split(',') if ing.strip()]
             if not context_ings_list: st.warning("재료를 한 개 이상 입력해주세요.")
             else:
                 st.caption(f"인식된 재료 ({len(context_ings_list)}개): {', '.join(context_ings_list)}")
                 c1_c, c2_c = st.columns(2)
-                with c1_c: target_str_c = st.text_input("🎯 바꿀 재료 (위 리스트 중)", placeholder="예: 계란", key="tab2_target")
-                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구", placeholder="예: 약간", key="tab2_stop")
+                with c1_c: target_str_c = st.text_input("🎯 바꿀 재료 (위 리스트 중)", placeholder="예: 계란", key="v2_target")
+                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구", placeholder="예: 약간", key="v2_stop")
                 if target_str_c:
                     targets_c = [t.strip() for t in target_str_c.split(',') if t.strip()]
                     stops_c = [s.strip() for s in stop_str_c.split(',') if s.strip()]
@@ -218,7 +254,6 @@ with col_main:
                                 st.dataframe(m_df_c.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                             else: st.info("조합을 찾을 수 없습니다.")
                         if has_result_c:
-                            # 로그 저장 시 custom_dish_name 사용
                             current_state_c = f"Custom_{custom_dish_name}_{target_str_c}_{stop_str_c}_{w_w2v}_{w_d2v}_{final_recommendations_c}"
                             if 'last_log_state_c' not in st.session_state: st.session_state['last_log_state_c'] = ""
                             if st.session_state['last_log_state_c'] != current_state_c:
