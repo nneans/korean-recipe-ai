@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import logic
 import os
+from datetime import datetime, timedelta, timezone
 
 # -------------------------------------------------------------------------
 # 1. 페이지 기본 설정 & 세션 상태 초기화 & 다이얼로그 함수 정의
@@ -123,38 +124,63 @@ with st.sidebar:
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
     
-    # [NEW]📊 오늘의 인사이트 (Beta) 섹션 추가
+    # [NEW & MODIFIED] 인사이트 대시보드 (탭으로 구분)
     st.divider()
-    st.subheader("📊 오늘의 인사이트 (Beta)")
+    st.subheader("📊 인사이트 대시보드 (Beta)")
     
-    # logic.py에서 통계 데이터와 불용어 목록 로드
-    today_count, top_dishes, top_targets = logic.get_daily_stats()
+    # KST 기준 오늘 날짜 계산
+    kst = timezone(timedelta(hours=9))
+    today_date_string = datetime.now(kst).strftime("%Y년 %m월 %d일")
+
     stopwords_list = logic.load_global_stopwords()
     stopwords_count = len(stopwords_list)
 
-    # 1. 메트릭 표시 (오늘 사용량, 불용어 수)
-    col_m1, col_m2 = st.columns(2)
-    col_m1.metric("오늘 사용량", f"{today_count}건", help="오늘 하루 동안 발생한 재료 추천 요청 횟수입니다. (KST 0시 기준 초기화)")
-    col_m2.metric("신고된 불용어", f"{stopwords_count}개", help="사용자들이 신고하여 현재 추천에서 제외 중인 단어의 총 개수입니다.")
+    # 탭 생성
+    tab_today, tab_all = st.tabs(["📅 오늘", "📈 누적"])
 
-    # 2. 인기 차트 표시 (데이터가 있을 때만)
-    if today_count > 0:
-        st.caption("🔥 오늘 가장 많이 찾은 검색어 Top 5")
-        tab_dish, tab_target = st.tabs(["요리명", "타겟 재료"])
-        with tab_dish:
-            if not top_dishes.empty:
-                st.bar_chart(top_dishes, color="#FF9F43", height=200)
-            else:
-                st.caption("데이터가 충분하지 않습니다.")
-        with tab_target:
-            if not top_targets.empty:
-                st.bar_chart(top_targets, color="#2ECC71", height=200)
-            else:
-                st.caption("데이터가 충분하지 않습니다.")
-    else:
-        st.info("아직 오늘의 데이터가 없습니다. 첫 번째 사용자가 되어보세요! 😉")
+    # --- [탭 1: 오늘] ---
+    with tab_today:
+        st.caption(f"기준일: {today_date_string} (KST)")
+        today_count, today_dishes, today_targets = logic.get_usage_stats(timeframe='today')
+        
+        col_m1_t, col_m2_t = st.columns(2)
+        col_m1_t.metric("오늘 사용량", f"{today_count}건", help="오늘(00시~현재) 발생한 추천 요청 횟수입니다.")
+        col_m2_t.metric("누적 불용어", f"{stopwords_count}개", help="현재까지 등록된 전체 불용어 개수입니다.")
 
-    # 3. 불용어 목록 보기 (익스팬더)
+        if today_count > 0:
+            st.caption("🔥 오늘 인기 검색어 Top 5")
+            tab_dish_t, tab_target_t = st.tabs(["요리명", "타겟 재료"])
+            with tab_dish_t:
+                if not today_dishes.empty: st.bar_chart(today_dishes, color="#FF9F43", height=200)
+                else: st.caption("데이터 부족")
+            with tab_target_t:
+                if not today_targets.empty: st.bar_chart(today_targets, color="#2ECC71", height=200)
+                else: st.caption("데이터 부족")
+        else:
+            st.info("아직 오늘의 데이터가 없습니다. 첫 번째 사용자가 되어보세요! 😉")
+
+    # --- [탭 2: 누적] ---
+    with tab_all:
+        st.caption("서비스 시작 이후 전체 데이터")
+        all_count, all_dishes, all_targets = logic.get_usage_stats(timeframe='all')
+        
+        col_m1_a, col_m2_a = st.columns(2)
+        col_m1_a.metric("총 사용량", f"{all_count}건", help="서비스 시작 이후 누적된 총 추천 요청 횟수입니다.")
+        # 불용어 개수는 동일하므로 여기서는 생략하거나 다른 메트릭으로 대체 가능
+
+        if all_count > 0:
+            st.caption("🏆 역대 인기 검색어 Top 5")
+            tab_dish_a, tab_target_a = st.tabs(["요리명", "타겟 재료"])
+            with tab_dish_a:
+                if not all_dishes.empty: st.bar_chart(all_dishes, color="#FF9F43", height=200)
+                else: st.caption("데이터 부족")
+            with tab_target_a:
+                if not all_targets.empty: st.bar_chart(all_targets, color="#2ECC71", height=200)
+                else: st.caption("데이터 부족")
+        else:
+            st.info("누적 데이터가 없습니다.")
+
+    # 불용어 목록 보기 (공통)
     with st.expander("📋 신고된 불용어 목록 보기"):
         if stopwords_list:
             df_stopwords = pd.DataFrame(stopwords_list, columns=["불용어 단어"])
@@ -232,7 +258,6 @@ with col_main:
                         if len(targets) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (DB 기반)")
                             t = targets[0]
-                            # 임시 불용어 전달
                             res = logic.substitute_single(recipe_id, t, stops, w_w2v, w_d2v, w_method, w_cat, topn=5)
                             st.markdown(f"**{t}** 대체 결과")
                             if not res.empty:
@@ -246,7 +271,6 @@ with col_main:
                             else: st.warning("결과 없음")
                         elif len(targets) > 1:
                             st.subheader("🧩 최적의 재료 조합 (DB 기반 다중 대체)")
-                            # 임시 불용어 전달
                             multi_res = logic.substitute_multi(recipe_id, targets, stops, w_w2v, w_d2v, w_method, w_cat)
                             if multi_res:
                                 has_result = True
@@ -333,12 +357,11 @@ with col_main:
                         if len(targets_c) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (커스텀)")
                             t_c = targets_c[0]
-                            # 임시 불용어 전달
                             res_c = logic.substitute_single_custom(t_c, context_ings_list, stops_c, w_w2v, w_d2v, topn=5)
                             st.markdown(f"**{t_c}** 대체 결과")
                             if not res_c.empty:
                                 has_result_c = True
-                                final_recommendations_c = res['대체재료'].head(3).tolist()
+                                final_recommendations_c = res_c['대체재료'].head(3).tolist()
                                 display_df_c = res_c[['대체재료', '최종점수', 'saving_score']].copy()
                                 display_df_c['예상 원가변동'] = display_df_c['saving_score'].apply(lambda x: format_saving(x))
                                 display_df_c = display_df_c[['대체재료', '최종점수', '예상 원가변동']]
@@ -347,7 +370,6 @@ with col_main:
                             else: st.warning("결과 없음")
                         elif len(targets_c) > 1:
                             st.subheader("🧩 최적의 재료 조합 (커스텀 다중 대체)")
-                            # 임시 불용어 전달
                             multi_res_c = logic.substitute_multi_custom(targets_c, context_ings_list, stops_c, w_w2v, w_d2v)
                             if multi_res_c:
                                 has_result_c = True
@@ -390,7 +412,6 @@ with col_feedback:
 
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
-    # help 인자를 사용하여 도움말 아이콘과 설명 추가
     st.caption(
         "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
         help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
@@ -401,9 +422,6 @@ with col_stopword:
         if submitted_stop:
             if stopword_input:
                 success, msg = logic.save_stopword_to_db(stopword_input)
-                if success:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-            else:
-                st.warning("단어를 입력해주세요.")
+                if success: st.success(msg)
+                else: st.error(msg)
+            else: st.warning("단어를 입력해주세요.")
