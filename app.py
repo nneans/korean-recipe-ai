@@ -127,6 +127,20 @@ with st.sidebar:
     # 버튼 이름 변경
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
+    
+    # 불용어 목록 보기 기능
+    st.divider()
+    with st.expander("📋 신고된 불용어 목록 보기"):
+        st.caption("사용자들이 신고하여 추천에서 제외된 단어들입니다.")
+        try:
+            stopwords_data = logic.load_global_stopwords()
+            if stopwords_data:
+                df_stopwords = pd.DataFrame(list(stopwords_data), columns=["불용어 단어"])
+                st.dataframe(df_stopwords, use_container_width=True, hide_index=True)
+            else:
+                st.info("아직 신고된 불용어가 없습니다.")
+        except Exception as e:
+            st.error(f"불용어 목록을 불러오는 중 오류가 발생했습니다: {e}")
 
 # -------------------------------------------------------------------------
 # 3. 메인 UI (선택된 모드에 따라 내용 표시)
@@ -185,7 +199,7 @@ with col_main:
                 
                 c1, c2 = st.columns(2)
                 with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
-                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
+                with c2: stop_str = st.text_input("🚫 제거할 문구 (임시)", placeholder="약간, 시판용")
                 
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
@@ -221,11 +235,9 @@ with col_main:
                                 st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                             else: st.info("조합을 찾을 수 없습니다.")
                         if has_result:
-                            # [수정] 여기서 dish_name 대신 final_dish_name 사용
                             current_state = f"DB_{final_dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recommendations}"
                             if 'last_log_state' not in st.session_state: st.session_state['last_log_state'] = ""
                             if st.session_state['last_log_state'] != current_state:
-                                # [수정] 여기서도 dish_name 대신 final_dish_name 사용
                                 log_id = logic.save_log_to_db(final_dish_name, target_str, stops, w_w2v, w_d2v, w_method, w_cat, rec_list=final_recommendations, is_custom=False)
                                 st.session_state['current_log_id'] = log_id
                                 st.session_state['last_log_state'] = current_state
@@ -358,7 +370,11 @@ with col_feedback:
 
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
-    st.caption("추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.")
+    # [수정] help 인자를 사용하여 도움말 아이콘과 설명 추가
+    st.caption(
+        "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
+        help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
+    )
     with st.form("stopword_form"):
         stopword_input = st.text_input("신고할 단어 입력", placeholder="예: 약간, 머그컵으로")
         submitted_stop = st.form_submit_button("신고하기", use_container_width=True)
