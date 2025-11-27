@@ -43,7 +43,6 @@ def get_kst_now_iso():
 def load_global_stopwords():
     try:
         supabase = init_supabase()
-        # 공감 기능 제거 -> 단순히 단어만 가져오기
         response = supabase.table("stopwords").select("word").order("created_at", desc=True).execute()
         if response.data:
             return [item['word'] for item in response.data]
@@ -113,32 +112,6 @@ def get_wordcloud_text(timeframe='today'):
         print(f"워드클라우드 데이터 로드 실패: {e}")
         return ""
 
-@st.cache_data(ttl=600)
-def get_top_replacement_pairs(timeframe='today'):
-    try:
-        supabase = init_supabase()
-        query = supabase.table("usage_log").select("target, rec_1").neq("rec_1", "None").neq("target", "")
-        if timeframe == 'today':
-            kst = timezone(timedelta(hours=9))
-            now_kst = datetime.now(kst)
-            today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow_start = today_start + timedelta(days=1)
-            query = query.gte("created_at", today_start.isoformat()).lt("created_at", tomorrow_start.isoformat())
-
-        response = query.execute()
-        data = response.data
-        pairs = []
-        if data:
-            for item in data:
-                targets = [t.strip() for t in item['target'].split(',') if t.strip()]
-                if targets and item['rec_1']:
-                    pairs.append(f"{targets[0]} ➡️ {item['rec_1']}")
-        
-        return pd.Series(Counter(pairs)).sort_values(ascending=False).head(5)
-    except Exception as e:
-        print(f"대체 쌍 데이터 로드 실패: {e}")
-        return pd.Series(dtype=int)
-
 def save_stopwords_to_db(words_string):
     words = [w.strip() for w in words_string.split(',') if w.strip()]
     if not words: return False, "저장할 단어가 없습니다."
@@ -158,18 +131,15 @@ def save_stopwords_to_db(words_string):
     if fail_count > 0: msg_parts.append(f"❌ {fail_count}개 실패")
     return success_count > 0, ", ".join(msg_parts)
 
-# [NEW] 게시판 목록 가져오기
-@st.cache_data(ttl=60) # 1분마다 갱신
+# 게시판 목록 가져오기
+@st.cache_data(ttl=60) 
 def get_board_messages():
     try:
         supabase = init_supabase()
-        # 최신순 50개만 가져오기
         response = supabase.table("board").select("*").order("created_at", desc=True).limit(50).execute()
         if response.data:
-            # 시간 포맷을 보기 좋게 변경 (ISO -> YYYY-MM-DD HH:MM)
             for item in response.data:
                 dt = datetime.fromisoformat(item['created_at'])
-                # KST 보정 (서버가 UTC라면 +9시간)
                 dt_kst = dt + timedelta(hours=9) 
                 item['display_time'] = dt_kst.strftime("%m/%d %H:%M")
             return response.data
@@ -178,19 +148,13 @@ def get_board_messages():
         print(f"게시판 로드 실패: {e}")
         return []
 
-# [NEW] 게시판 글 저장
+# 게시판 글 저장
 def save_board_message(nickname, content):
-    if not nickname or not content:
-        return False
+    if not nickname or not content: return False
     try:
         supabase = init_supabase()
-        # created_at은 DB에서 자동 생성되지만, UTC 기준이므로 KST로 넣고 싶다면 아래처럼 직접 지정
-        # 여기서는 DB Default(UTC)를 쓰고 표시할 때 변환하는 방식 권장
-        supabase.table("board").insert({
-            "nickname": nickname,
-            "content": content
-        }).execute()
-        st.cache_data.clear() # 저장 후 즉시 반영을 위해 캐시 삭제
+        supabase.table("board").insert({"nickname": nickname, "content": content}).execute()
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"게시판 저장 실패: {e}")
@@ -253,7 +217,6 @@ def load_resources():
     except:
         price_map = {}
     
-    # [MODIFIED] 단순 리스트로 로드
     global_stopwords_list = load_global_stopwords()
     global_stopwords_set = set(global_stopwords_list)
 
@@ -299,7 +262,7 @@ def get_estimated_price_rank(ing_name, price_map):
     return 3
 
 # ==========================================
-# 4. 대체 추천 알고리즘 (DB 기반) (기존과 동일)
+# 4. 대체 추천 알고리즘 (DB 기반)
 # ==========================================
 def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
@@ -455,7 +418,7 @@ def substitute_multi(recipe_id, targets, user_stopwords, w_w2v, w_d2v, w_method,
     return final_results[:result_topn]
 
 # ==========================================
-# 5. 커스텀 입력 기반 대체 알고리즘 (기존과 동일)
+# 5. 커스텀 입력 기반 대체 알고리즘
 # ==========================================
 def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2v, w_d2v, excluded_ings=None, topn=10):
     if target_ing not in w2v_model.wv: return pd.DataFrame()
