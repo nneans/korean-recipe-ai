@@ -6,7 +6,7 @@ from gensim.models import Word2Vec, Doc2Vec
 from ast import literal_eval
 import pickle
 from datetime import datetime, timedelta, timezone
-from supabase import create_client
+from supabase import create_client, PostgrestError
 
 # ==========================================
 # 0. 환경 설정 및 규칙 정의
@@ -36,6 +36,45 @@ def get_kst_now_iso():
     kst_timezone = timezone(timedelta(hours=9))
     now_kst = datetime.now(kst_timezone)
     return now_kst.isoformat()
+
+# [NEW] 전역 불용어 로드 함수 (캐싱 사용)
+@st.cache_data(ttl=3600) # 1시간마다 갱신
+def load_global_stopwords():
+    """Supabase에서 전역 불용어 목록을 불러옵니다."""
+    try:
+        supabase = init_supabase()
+        response = supabase.table("stopwords").select("word").execute()
+        if response.data:
+            # 데이터프레임 형태로 변환 후 리스트로 추출
+            return set(item['word'] for item in response.data)
+        return set()
+    except Exception as e:
+        print(f"불용어 로드 실패: {e}")
+        return set()
+
+# [NEW] 불용어 신고 저장 함수
+def save_stopword_to_db(word):
+    """사용자가 신고한 불용어를 DB에 저장합니다."""
+    clean_word = word.strip()
+    if not clean_word:
+        return False, "단어를 입력해주세요."
+    
+    try:
+        supabase = init_supabase()
+        data = {"word": clean_word}
+        supabase.table("stopwords").insert(data).execute()
+        # 저장 성공 시 캐시를 비워서 다음 로드 때 반영되도록 함 (선택 사항, 성능 고려 필요)
+        # st.cache_data.clear() 
+        return True, f"'{clean_word}'가 불용어 DB에 추가되었습니다."
+    except PostgrestError as e:
+        # 중복된 단어일 경우 (unique constraint violation)
+        if 'duplicate key value violates unique constraint' in str(e):
+             return False, f"'{clean_word}'는 이미 등록된 불용어입니다."
+        print(f"불용어 저장 에러: {e}")
+        return False, "저장 중 오류가 발생했습니다."
+    except Exception as e:
+        print(f"불용어 저장 에러: {e}")
+        return False, "저장 중 오류가 발생했습니다."
 
 def save_feedback_to_db(feedback_text):
     try:
@@ -100,9 +139,14 @@ def load_resources():
     except Exception as e:
         print(f"Error reading price_rank.csv: {e}")
         price_map = {}
-    return w2v, d2v, df, stats, price_map
+    
+    # [NEW] 전역 불용어 로드
+    global_stopwords = load_global_stopwords()
 
-w2v_model, d2v_model, df, stats, price_map = load_resources()
+    return w2v, d2v, df, stats, price_map, global_stopwords
+
+# [NEW] global_stopwords 추가 로드
+w2v_model, d2v_model, df, stats, price_map, global_stopwords = load_resources()
 
 method_map = stats["method_map"]
 recipes_by_ingredient = stats["recipes_by_ingredient"]
@@ -140,7 +184,8 @@ def get_estimated_price_rank(ing_name, price_map):
 # ==========================================
 # 4. 대체 추천 알고리즘 (DB 기반)
 # ==========================================
-def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
+# [수정] stopwords 인자를 받아서 global_stopwords와 합침
+def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
@@ -155,12 +200,21 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
     candidates_raw = w2v_model.wv.most_similar(target_ing, topn=50)
     temp_results = []
     seen_candidates = set()
+    
+    # [NEW] 사용자 입력 불용어와 전역 불용어 합치기
+    final_stopwords = set(user_stopwords) | global_stopwords
+
     for cand, score_w2v in candidates_raw:
         clean_cand = cand
-        if stopwords:
-            for stop in stopwords: clean_cand = clean_cand.replace(stop, "")
+        # [수정] 합쳐진 불용어 목록으로 필터링
+        if final_stopwords:
+            for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
         clean_cand = clean_cand.strip()
+        
         if not clean_cand: continue
+        # [추가] 불용어 제거 후에도 혹시 불용어 목록에 있는 단어 자체만 남았다면 제외
+        if clean_cand in final_stopwords: continue
+
         if clean_cand in context_ings: continue
         if clean_cand == target_ing: continue
         if clean_cand not in w2v_model.wv: continue
@@ -199,7 +253,8 @@ def substitute_single(recipe_id, target_ing, stopwords, w_w2v, w_d2v, w_method, 
     df_res["최종점수"] = ((df_res["W2V"]*w_w2v) + (df_res["D2V"]*w_d2v) + (df_res["Method"]*w_method) + (df_res["Category"]*w_cat)) / total_weight
     return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
 
-def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_cat, beam_width=3, result_topn=3):
+# [수정] stopwords 인자를 받아서 global_stopwords와 합침
+def substitute_multi(recipe_id, targets, user_stopwords, w_w2v, w_d2v, w_method, w_cat, beam_width=3, result_topn=3):
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
@@ -211,6 +266,10 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
     if total_weight == 0: total_weight = 1.0
     target_ranks_sum = 0
     for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
+    
+    # [NEW] 사용자 입력 불용어와 전역 불용어 합치기
+    final_stopwords = set(user_stopwords) | global_stopwords
+
     beam = [(0.0, [], initial_context)]
     for target_ing in targets:
         next_beam = []
@@ -225,10 +284,14 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
             seen_candidates = set()
             for cand, _ in candidates:
                 clean_cand = cand
-                if stopwords:
-                    for stop in stopwords: clean_cand = clean_cand.replace(stop, "")
+                # [수정] 합쳐진 불용어 목록으로 필터링
+                if final_stopwords:
+                    for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
                 clean_cand = clean_cand.strip()
+
                 if not clean_cand: continue
+                if clean_cand in final_stopwords: continue
+
                 if clean_cand in current_ctx_ing or clean_cand in path_subs: continue
                 if clean_cand == target_ing: continue
                 if clean_cand not in w2v_model.wv: continue
@@ -284,7 +347,8 @@ def substitute_multi(recipe_id, targets, stopwords, w_w2v, w_d2v, w_method, w_ca
 # ==========================================
 # 5. 커스텀 입력 기반 대체 알고리즘
 # ==========================================
-def substitute_single_custom(target_ing, context_ings_list, stopwords, w_w2v, w_d2v, topn=10):
+# [수정] stopwords 인자를 받아서 global_stopwords와 합침
+def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2v, w_d2v, topn=10):
     if target_ing not in w2v_model.wv: return pd.DataFrame()
     total_weight = w_w2v + w_d2v
     if total_weight == 0: total_weight = 1.0
@@ -296,12 +360,20 @@ def substitute_single_custom(target_ing, context_ings_list, stopwords, w_w2v, w_
     candidates_raw = w2v_model.wv.most_similar(target_ing, topn=50)
     temp_results = []
     seen_candidates = set()
+
+    # [NEW] 사용자 입력 불용어와 전역 불용어 합치기
+    final_stopwords = set(user_stopwords) | global_stopwords
+
     for cand, score_w2v in candidates_raw:
         clean_cand = cand
-        if stopwords:
-            for stop in stopwords: clean_cand = clean_cand.replace(stop, "")
+        # [수정] 합쳐진 불용어 목록으로 필터링
+        if final_stopwords:
+            for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
         clean_cand = clean_cand.strip()
+
         if not clean_cand: continue
+        if clean_cand in final_stopwords: continue
+
         if clean_cand in context_ings_list: continue
         if clean_cand == target_ing: continue
         if clean_cand not in w2v_model.wv: continue
@@ -338,7 +410,8 @@ def substitute_single_custom(target_ing, context_ings_list, stopwords, w_w2v, w_
     df_res["최종점수"] = ((df_res["W2V"]*w_w2v) + (df_res["D2V"]*w_d2v)) / total_weight
     return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
 
-def substitute_multi_custom(targets, context_ings_list, stopwords, w_w2v, w_d2v, beam_width=3, result_topn=3):
+# [수정] stopwords 인자를 받아서 global_stopwords와 합침
+def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w_d2v, beam_width=3, result_topn=3):
     total_weight = w_w2v + w_d2v
     if total_weight == 0: total_weight = 1.0
     vec_custom_context = None
@@ -347,6 +420,10 @@ def substitute_multi_custom(targets, context_ings_list, stopwords, w_w2v, w_d2v,
         if valid_context: vec_custom_context = d2v_model.infer_vector(valid_context)
     target_ranks_sum = 0
     for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
+    
+    # [NEW] 사용자 입력 불용어와 전역 불용어 합치기
+    final_stopwords = set(user_stopwords) | global_stopwords
+
     beam = [(0.0, [], context_ings_list)]
     for target_ing in targets:
         next_beam = []
@@ -361,10 +438,14 @@ def substitute_multi_custom(targets, context_ings_list, stopwords, w_w2v, w_d2v,
             seen_candidates = set()
             for cand, _ in candidates:
                 clean_cand = cand
-                if stopwords:
-                    for stop in stopwords: clean_cand = clean_cand.replace(stop, "")
+                # [수정] 합쳐진 불용어 목록으로 필터링
+                if final_stopwords:
+                    for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
                 clean_cand = clean_cand.strip()
+
                 if not clean_cand: continue
+                if clean_cand in final_stopwords: continue
+
                 if clean_cand in current_ctx_ing or clean_cand in path_subs: continue
                 if clean_cand == target_ing: continue
                 if clean_cand not in w2v_model.wv: continue
@@ -419,10 +500,9 @@ def substitute_multi_custom(targets, context_ings_list, stopwords, w_w2v, w_d2v,
     return final_results[:result_topn]
 
 # ==========================================
-# 6. [NEW] 재료 키워드 기반 레시피 검색
+# 6. 재료 키워드 기반 레시피 검색
 # ==========================================
 def find_recipes_by_ingredient_keyword(keyword, topn=5):
-    """입력된 키워드가 재료에 포함된 레시피의 요리명을 검색합니다."""
     keyword = keyword.strip()
     if not keyword: return []
     matched_dishes = set()
