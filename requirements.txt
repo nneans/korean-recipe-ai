@@ -5,3 +5,4 @@ gensim
 scikit-learn
 matplotlib
 supabase
+wordcloud
