@@ -19,15 +19,19 @@ def format_saving(score, is_multi=False):
     elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
     else: return "⚪ 동일 수준"
 
+# 팝업창 넓이를 'large'로 설정하여 가로로 넓게 만듭니다.
 @st.dialog("🧠 AI 추천 알고리즘 작동 원리 상세", width="large")
 def show_logic_dialog():
+    # 최상단에 저장된 플로우차트 이미지를 불러옵니다.
     if os.path.exists("flowchart.png"):
         st.image("flowchart.png", use_container_width=True)
     else:
+        # 이미지가 없을 경우를 대비한 예외 처리
         st.warning("플로우차트 이미지(flowchart.png)를 찾을 수 없습니다.")
 
     st.markdown("---")
-    # (기존 설명 내용은 그대로 유지)
+
+    # 모든 볼드체(**) 제거 및 내용 유지
     st.markdown("""
     ### AI 추천 로직 상세 해부
 
@@ -120,6 +124,7 @@ with st.sidebar:
     w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
     if not is_v1: st.caption("💡 커스텀 모드에서는 통계 가중치가 적용되지 않습니다.")
     st.divider()
+    # 버튼 이름 변경
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
 
@@ -180,7 +185,7 @@ with col_main:
                 
                 c1, c2 = st.columns(2)
                 with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
-                with c2: stop_str = st.text_input("🚫 제거할 문구 (임시)", placeholder="약간, 시판용")
+                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
                 
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
@@ -193,7 +198,7 @@ with col_main:
                         if len(targets) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (DB 기반)")
                             t = targets[0]
-                            # [수정] 임시 불용어 전달
+                            # 임시 불용어 전달
                             res = logic.substitute_single(recipe_id, t, stops, w_w2v, w_d2v, w_method, w_cat, topn=5)
                             st.markdown(f"**{t}** 대체 결과")
                             if not res.empty:
@@ -207,7 +212,7 @@ with col_main:
                             else: st.warning("결과 없음")
                         elif len(targets) > 1:
                             st.subheader("🧩 최적의 재료 조합 (DB 기반 다중 대체)")
-                            # [수정] 임시 불용어 전달
+                            # 임시 불용어 전달
                             multi_res = logic.substitute_multi(recipe_id, targets, stops, w_w2v, w_d2v, w_method, w_cat)
                             if multi_res:
                                 has_result = True
@@ -216,10 +221,12 @@ with col_main:
                                 st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                             else: st.info("조합을 찾을 수 없습니다.")
                         if has_result:
-                            current_state = f"DB_{dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recommendations}"
+                            # [수정] 여기서 dish_name 대신 final_dish_name 사용
+                            current_state = f"DB_{final_dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recommendations}"
                             if 'last_log_state' not in st.session_state: st.session_state['last_log_state'] = ""
                             if st.session_state['last_log_state'] != current_state:
-                                log_id = logic.save_log_to_db(dish_name, target_str, stops, w_w2v, w_d2v, w_method, w_cat, rec_list=final_recommendations, is_custom=False)
+                                # [수정] 여기서도 dish_name 대신 final_dish_name 사용
+                                log_id = logic.save_log_to_db(final_dish_name, target_str, stops, w_w2v, w_d2v, w_method, w_cat, rec_list=final_recommendations, is_custom=False)
                                 st.session_state['current_log_id'] = log_id
                                 st.session_state['last_log_state'] = current_state
                             if 'current_log_id' in st.session_state and st.session_state['current_log_id']:
@@ -294,7 +301,7 @@ with col_main:
                         if len(targets_c) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (커스텀)")
                             t_c = targets_c[0]
-                            # [수정] 임시 불용어 전달
+                            # 임시 불용어 전달
                             res_c = logic.substitute_single_custom(t_c, context_ings_list, stops_c, w_w2v, w_d2v, topn=5)
                             st.markdown(f"**{t_c}** 대체 결과")
                             if not res_c.empty:
@@ -308,7 +315,7 @@ with col_main:
                             else: st.warning("결과 없음")
                         elif len(targets_c) > 1:
                             st.subheader("🧩 최적의 재료 조합 (커스텀 다중 대체)")
-                            # [수정] 임시 불용어 전달
+                            # 임시 불용어 전달
                             multi_res_c = logic.substitute_multi_custom(targets_c, context_ings_list, stops_c, w_w2v, w_d2v)
                             if multi_res_c:
                                 has_result_c = True
@@ -334,12 +341,11 @@ with col_main:
         else: st.info("👆 전체 재료 리스트를 먼저 입력해주세요.")
 
 # -------------------------------------------------------------------------
-# 4. 하단 피드백 및 불용어 신고 영역 (수정됨!)
+# 4. 하단 피드백 및 불용어 신고 영역
 # -------------------------------------------------------------------------
 st.divider()
 col_feedback, col_stopword = st.columns(2)
 
-# [수정] 기존 피드백 폼을 왼쪽 컬럼으로 이동
 with col_feedback:
     st.subheader("📢 서비스 의견 보내기")
     with st.form("feedback_form"):
@@ -350,7 +356,6 @@ with col_feedback:
                 if logic.save_feedback_to_db(text): st.success("의견 감사합니다!"); st.balloons()
             else: st.warning("내용을 입력해주세요.")
 
-# [NEW] 오른쪽 컬럼에 불용어 신고 폼 추가
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
     st.caption("추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.")
@@ -362,8 +367,6 @@ with col_stopword:
                 success, msg = logic.save_stopword_to_db(stopword_input)
                 if success:
                     st.success(msg)
-                    # 캐시를 비워 다음 번 로드 때 반영되게 함 (선택 사항)
-                    # st.cache_data.clear() 
                 else:
                     st.error(msg)
             else:
