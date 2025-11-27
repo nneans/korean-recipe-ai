@@ -39,35 +39,18 @@ def get_kst_now_iso():
     now_kst = datetime.now(kst_timezone)
     return now_kst.isoformat()
 
-# [MODIFIED] 불용어 데이터 로드 (ID, likes 포함 및 공감순 정렬)
-@st.cache_data(ttl=300) # 캐시 시간 단축
-def load_global_stopwords_with_info():
+@st.cache_data(ttl=300)
+def load_global_stopwords():
     try:
         supabase = init_supabase()
-        # likes 내림차순, 그 다음 최신순 정렬
-        response = supabase.table("stopwords").select("id, word, likes").order("likes", desc=True).order("created_at", desc=True).execute()
+        # 공감 기능 제거 -> 단순히 단어만 가져오기
+        response = supabase.table("stopwords").select("word").order("created_at", desc=True).execute()
         if response.data:
-            return response.data # 리스트의 딕셔너리 형태 반환 [{'id':1, 'word':'...', 'likes':0}, ...]
+            return [item['word'] for item in response.data]
         return []
     except Exception as e:
         print(f"불용어 로드 실패: {e}")
         return []
-
-# [NEW] 불용어 공감 수 증가
-def increment_stopword_likes(word_id):
-    try:
-        supabase = init_supabase()
-        # 현재 likes 값을 가져와서 +1
-        current = supabase.table("stopwords").select("likes").eq("id", word_id).execute()
-        if current.data:
-            new_likes = current.data[0]['likes'] + 1
-            supabase.table("stopwords").update({"likes": new_likes}).eq("id", word_id).execute()
-            st.cache_data.clear() # 캐시 비우기
-            return True
-        return False
-    except Exception as e:
-        print(f"공감 증가 실패: {e}")
-        return False
 
 @st.cache_data(ttl=600)
 def get_usage_stats(timeframe='today'):
@@ -106,7 +89,6 @@ def get_usage_stats(timeframe='today'):
         print(f"통계 데이터 로드 실패 ({timeframe}): {e}")
         return 0, pd.Series(dtype=int), pd.Series(dtype=int)
 
-# [NEW] 워드 클라우드용 텍스트 데이터 생성
 @st.cache_data(ttl=600)
 def get_wordcloud_text(timeframe='today'):
     try:
@@ -131,7 +113,6 @@ def get_wordcloud_text(timeframe='today'):
         print(f"워드클라우드 데이터 로드 실패: {e}")
         return ""
 
-# [NEW] 가장 많이 대체된 재료 쌍 구하기
 @st.cache_data(ttl=600)
 def get_top_replacement_pairs(timeframe='today'):
     try:
@@ -150,7 +131,6 @@ def get_top_replacement_pairs(timeframe='today'):
         if data:
             for item in data:
                 targets = [t.strip() for t in item['target'].split(',') if t.strip()]
-                # 다중 대체인 경우 첫 번째 타겟만 사용 (단순화)
                 if targets and item['rec_1']:
                     pairs.append(f"{targets[0]} ➡️ {item['rec_1']}")
         
@@ -177,6 +157,44 @@ def save_stopwords_to_db(words_string):
     if duplicate_count > 0: msg_parts.append(f"⚠️ {duplicate_count}개 중복")
     if fail_count > 0: msg_parts.append(f"❌ {fail_count}개 실패")
     return success_count > 0, ", ".join(msg_parts)
+
+# [NEW] 게시판 목록 가져오기
+@st.cache_data(ttl=60) # 1분마다 갱신
+def get_board_messages():
+    try:
+        supabase = init_supabase()
+        # 최신순 50개만 가져오기
+        response = supabase.table("board").select("*").order("created_at", desc=True).limit(50).execute()
+        if response.data:
+            # 시간 포맷을 보기 좋게 변경 (ISO -> YYYY-MM-DD HH:MM)
+            for item in response.data:
+                dt = datetime.fromisoformat(item['created_at'])
+                # KST 보정 (서버가 UTC라면 +9시간)
+                dt_kst = dt + timedelta(hours=9) 
+                item['display_time'] = dt_kst.strftime("%m/%d %H:%M")
+            return response.data
+        return []
+    except Exception as e:
+        print(f"게시판 로드 실패: {e}")
+        return []
+
+# [NEW] 게시판 글 저장
+def save_board_message(nickname, content):
+    if not nickname or not content:
+        return False
+    try:
+        supabase = init_supabase()
+        # created_at은 DB에서 자동 생성되지만, UTC 기준이므로 KST로 넣고 싶다면 아래처럼 직접 지정
+        # 여기서는 DB Default(UTC)를 쓰고 표시할 때 변환하는 방식 권장
+        supabase.table("board").insert({
+            "nickname": nickname,
+            "content": content
+        }).execute()
+        st.cache_data.clear() # 저장 후 즉시 반영을 위해 캐시 삭제
+        return True
+    except Exception as e:
+        print(f"게시판 저장 실패: {e}")
+        return False
 
 def save_feedback_to_db(feedback_text):
     try:
@@ -235,11 +253,10 @@ def load_resources():
     except:
         price_map = {}
     
-    # [MODIFIED] 불용어 로드 방식 변경
-    global_stopwords_info = load_global_stopwords_with_info()
-    global_stopwords_set = set([item['word'] for item in global_stopwords_info])
+    # [MODIFIED] 단순 리스트로 로드
+    global_stopwords_list = load_global_stopwords()
+    global_stopwords_set = set(global_stopwords_list)
 
-    # [NEW] 전체 재료 목록 생성 (Ver.2 제외 재료 설정용)
     all_ingredients_set = set()
     for ings in df['재료토큰']:
         all_ingredients_set.update(ings)
@@ -257,7 +274,7 @@ total_cat_counts = stats["total_cat_counts"]
 TOTAL_RECIPES = stats["TOTAL_RECIPES"]
 
 # ==========================================
-# 3. 핵심 계산 로직 (생략 - 기존과 동일)
+# 3. 핵심 계산 로직 (기존과 동일)
 # ==========================================
 def cos_sim(vec_a, vec_b):
     norm = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
@@ -282,7 +299,7 @@ def get_estimated_price_rank(ing_name, price_map):
     return 3
 
 # ==========================================
-# 4. 대체 추천 알고리즘 (DB 기반) (생략 - 기존과 동일)
+# 4. 대체 추천 알고리즘 (DB 기반) (기존과 동일)
 # ==========================================
 def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
@@ -318,7 +335,7 @@ def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_met
         seen_candidates.add(clean_cand)
         real_score_w2v = w2v_model.wv.similarity(target_ing, clean_cand)
         s_w2v = max(0.0, real_score_w2v)
-        if s_w2v < 0.35: continue
+        if s_w2v < 0.3: continue
         s_d2v = 0.0
         if w_d2v > 0 and vec_recipe is not None:
             rid_list = recipes_by_ingredient.get(clean_cand, [])
@@ -438,9 +455,8 @@ def substitute_multi(recipe_id, targets, user_stopwords, w_w2v, w_d2v, w_method,
     return final_results[:result_topn]
 
 # ==========================================
-# 5. 커스텀 입력 기반 대체 알고리즘 (수정)
+# 5. 커스텀 입력 기반 대체 알고리즘 (기존과 동일)
 # ==========================================
-# [MODIFIED] excluded_ings 파라미터 추가 및 필터링 로직 적용
 def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2v, w_d2v, excluded_ings=None, topn=10):
     if target_ing not in w2v_model.wv: return pd.DataFrame()
     total_weight = w_w2v + w_d2v
@@ -455,7 +471,6 @@ def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2
     seen_candidates = set()
 
     final_stopwords = set(user_stopwords) | global_stopwords_set
-    # [NEW] 제외 재료 집합 생성
     excluded_set = set(excluded_ings) if excluded_ings else set()
 
     for cand, score_w2v in candidates_raw:
@@ -466,7 +481,6 @@ def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2
 
         if not clean_cand: continue
         if clean_cand in final_stopwords: continue
-        # [NEW] 제외 재료 필터링
         if clean_cand in excluded_set: continue
 
         if clean_cand in context_ings_list: continue
@@ -505,7 +519,6 @@ def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2
     df_res["최종점수"] = ((df_res["W2V"]*w_w2v) + (df_res["D2V"]*w_d2v)) / total_weight
     return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
 
-# [MODIFIED] excluded_ings 파라미터 추가 및 필터링 로직 적용
 def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w_d2v, excluded_ings=None, beam_width=3, result_topn=3):
     total_weight = w_w2v + w_d2v
     if total_weight == 0: total_weight = 1.0
@@ -517,7 +530,6 @@ def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w
     for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
     
     final_stopwords = set(user_stopwords) | global_stopwords_set
-    # [NEW] 제외 재료 집합 생성
     excluded_set = set(excluded_ings) if excluded_ings else set()
 
     beam = [(0.0, [], context_ings_list)]
@@ -540,7 +552,6 @@ def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w
 
                 if not clean_cand: continue
                 if clean_cand in final_stopwords: continue
-                # [NEW] 제외 재료 필터링
                 if clean_cand in excluded_set: continue
 
                 if clean_cand in current_ctx_ing or clean_cand in path_subs: continue
@@ -597,7 +608,7 @@ def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w
     return final_results[:result_topn]
 
 # ==========================================
-# 6. 재료 키워드 기반 레시피 검색 (생략 - 기존과 동일)
+# 6. 재료 키워드 기반 레시피 검색 (기존과 동일)
 # ==========================================
 def find_recipes_by_ingredient_keyword(keyword, topn=5):
     keyword = keyword.strip()
