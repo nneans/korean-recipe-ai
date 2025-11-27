@@ -1,601 +1,387 @@
-# logic.py
+# app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
-from gensim.models import Word2Vec, Doc2Vec
-from ast import literal_eval
-import pickle
+import logic
+import os
 from datetime import datetime, timedelta, timezone
-from supabase import create_client
-import re
-from collections import Counter
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
 
-# ==========================================
-# 0. 환경 설정 및 규칙 정의
-# ==========================================
-PRICE_KEYWORD_RULES = [
-    (5, ['소고기', '한우', '채끝', '등심', '안심', '갈비살', '전복', '장어']),
-    (4, ['돼지', '삼겹', '목살', '앞다리', '뒷다리', '갈비', '오리', '낙지', '오징어', '새우', '명란']),
-    (3, ['닭', '치킨', '햄', '소시지', '베이컨', '스팸', '참치', '동원', '어묵', '맛살', '버섯', '치즈']),
-    (2, ['두부', '순두부', '콩나물', '숙주', '김치', '무', '감자', '고구마', '당근', '호박']),
-    (1, ['양파', '대파', '쪽파', '실파', '마늘', '고추', '물', '소금', '설탕', '간장', '소스', '양념', '육수'])
-]
-PRICE_RULE_EXCEPTIONS = ['돼지감자', '닭의장풀', '새우젓', '멸치액젓', '다시다']
+# -------------------------------------------------------------------------
+# 1. 페이지 기본 설정 & 세션 상태 초기화
+# -------------------------------------------------------------------------
+st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
+st.title("🍳 AI 식재료 대체 추천 대시보드")
 
-# ==========================================
-# 1. Supabase DB 연동 및 데이터 저장/로드
-# ==========================================
-@st.cache_resource
-def init_supabase():
-    try:
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
-        return create_client(url, key)
-    except Exception as e:
-        raise ConnectionError(f"Supabase 연결 실패: {e}")
+# 세션 상태 초기화 (입력창 값 유지 및 초기화용)
+if 'voted_logs' not in st.session_state: st.session_state['voted_logs'] = set()
+if "stopword_input_field" not in st.session_state: st.session_state["stopword_input_field"] = ""
+if "board_nick_input" not in st.session_state: st.session_state["board_nick_input"] = ""
+if "board_msg_input" not in st.session_state: st.session_state["board_msg_input"] = ""
+if "feedback_input_field" not in st.session_state: st.session_state["feedback_input_field"] = ""
 
-def get_kst_now_iso():
-    kst_timezone = timezone(timedelta(hours=9))
-    now_kst = datetime.now(kst_timezone)
-    return now_kst.isoformat()
+# -------------------------------------------------------------------------
+# 2. 헬퍼 함수 및 콜백 함수 (알림 통일)
+# -------------------------------------------------------------------------
+def format_saving(score, is_multi=False):
+    prefix = "총 " if is_multi else ""
+    if score > 0: return f"🟢 {prefix}+{score}단계 (절감)"
+    elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
+    else: return "⚪ 동일 수준"
 
-# [중요] 불용어 로드는 데이터 갱신이 필요하므로 cache_data 사용
-@st.cache_data(ttl=60) # 1분마다 갱신 (신고 즉시 반영을 위해 짧게 설정)
-def load_global_stopwords():
-    try:
-        supabase = init_supabase()
-        response = supabase.table("stopwords").select("word").order("created_at", desc=True).execute()
-        if response.data:
-            return [item['word'] for item in response.data]
-        return []
-    except Exception as e:
-        print(f"불용어 로드 실패: {e}")
-        return []
-
-@st.cache_data(ttl=600)
-def get_usage_stats(timeframe='today'):
-    try:
-        supabase = init_supabase()
-        query = supabase.table("usage_log").select("dish, target")
-
-        if timeframe == 'today':
-            kst = timezone(timedelta(hours=9))
-            now_kst = datetime.now(kst)
-            today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow_start = today_start + timedelta(days=1)
-            query = query.gte("created_at", today_start.isoformat()).lt("created_at", tomorrow_start.isoformat())
-        
-        response = query.execute()
-        data = response.data
-        
-        count = len(data)
-        top_dishes = pd.Series(dtype=int)
-        top_targets = pd.Series(dtype=int)
-
-        if count > 0:
-            df_log = pd.DataFrame(data)
-            df_log['clean_dish'] = df_log['dish'].astype(str).str.replace(r'\[Custom\]', '', regex=True).str.strip()
-            top_dishes = df_log[df_log['clean_dish'] != '']['clean_dish'].value_counts().head(5)
-
-            all_targets = []
-            for t in df_log['target']:
-                if t:
-                    all_targets.extend([x.strip() for x in str(t).split(',') if x.strip()])
-            top_targets = pd.Series(all_targets).value_counts().head(5)
-
-        return count, top_dishes, top_targets
-
-    except Exception as e:
-        print(f"통계 데이터 로드 실패 ({timeframe}): {e}")
-        return 0, pd.Series(dtype=int), pd.Series(dtype=int)
-
-@st.cache_data(ttl=600)
-def get_wordcloud_text(timeframe='today'):
-    try:
-        supabase = init_supabase()
-        query = supabase.table("usage_log").select("target")
-        if timeframe == 'today':
-            kst = timezone(timedelta(hours=9))
-            now_kst = datetime.now(kst)
-            today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow_start = today_start + timedelta(days=1)
-            query = query.gte("created_at", today_start.isoformat()).lt("created_at", tomorrow_start.isoformat())
-        
-        response = query.execute()
-        data = response.data
-        all_targets = []
-        if data:
-            for item in data:
-                if item['target']:
-                    all_targets.extend([x.strip() for x in str(item['target']).split(',') if x.strip()])
-        return " ".join(all_targets)
-    except Exception as e:
-        print(f"워드클라우드 데이터 로드 실패: {e}")
-        return ""
-
-def save_stopwords_to_db(words_string):
-    words = [w.strip() for w in words_string.split(',') if w.strip()]
-    if not words: return False, "저장할 단어가 없습니다."
-    supabase = init_supabase()
-    success_count, duplicate_count, fail_count = 0, 0, 0
-    for word in words:
-        try:
-            supabase.table("stopwords").insert({"word": word}).execute()
-            success_count += 1
-        except Exception as e:
-            if 'duplicate' in str(e).lower(): duplicate_count += 1
-            else: fail_count += 1
+@st.dialog("🧠 AI 추천 알고리즘 작동 원리 상세", width="large")
+def show_logic_dialog():
+    if os.path.exists("flowchart.png"):
+        st.image("flowchart.png", use_container_width=True)
     
-    # [중요] 저장 후 캐시를 비워서 즉시 반영되도록 함
-    if success_count > 0:
-        st.cache_data.clear()
-        
-    msg_parts = []
-    if success_count > 0: msg_parts.append(f"✅ {success_count}개 저장 완료")
-    if duplicate_count > 0: msg_parts.append(f"⚠️ {duplicate_count}개 중복")
-    if fail_count > 0: msg_parts.append(f"❌ {fail_count}개 실패")
-    return success_count > 0, ", ".join(msg_parts)
-
-# 게시판 목록 가져오기
-@st.cache_data(ttl=60) 
-def get_board_messages():
+    # 마크다운 텍스트 파일 읽기
     try:
-        supabase = init_supabase()
-        response = supabase.table("board").select("*").order("created_at", desc=True).limit(50).execute()
-        if response.data:
-            for item in response.data:
-                dt = datetime.fromisoformat(item['created_at'])
-                dt_kst = dt + timedelta(hours=9) 
-                item['display_time'] = dt_kst.strftime("%m/%d %H:%M")
-            return response.data
-        return []
-    except Exception as e:
-        print(f"게시판 로드 실패: {e}")
-        return []
-
-# 게시판 글 저장
-def save_board_message(nickname, content):
-    if not nickname or not content: return False
-    try:
-        supabase = init_supabase()
-        supabase.table("board").insert({"nickname": nickname, "content": content}).execute()
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        print(f"게시판 저장 실패: {e}")
-        return False
-
-def save_feedback_to_db(feedback_text):
-    try:
-        supabase = init_supabase()
-        supabase.table("feedback").insert({"content": feedback_text, "created_at": get_kst_now_iso()}).execute()
-        return True
-    except Exception as e:
-        print(f"피드백 저장 에러: {e}")
-        return False
-
-def save_log_to_db(dish, target, stops, w1, w2, w3, w4, rec_list=None, is_custom=False):
-    try:
-        supabase = init_supabase()
-        r1 = rec_list[0] if rec_list and len(rec_list) > 0 else None
-        r2 = rec_list[1] if rec_list and len(rec_list) > 1 else None
-        r3 = rec_list[2] if rec_list and len(rec_list) > 2 else None
-        dish_name_to_save = f"[Custom] {dish}" if is_custom else dish
-        data = {
-            "dish": dish_name_to_save, "target": target, "stops": ", ".join(stops) if stops else "없음",
-            "w_w2v": w1, "w_d2v": w2, "w_method": w3, "w_cat": w4, "rec_1": r1, "rec_2": r2, "rec_3": r3,
-            "created_at": get_kst_now_iso()
-        }
-        response = supabase.table("usage_log").insert(data).execute()
-        if response.data: return response.data[0]['id']
-        return None
-    except Exception as e:
-        print(f"로그 저장 에러: {e}")
-        return None
-
-def update_feedback_in_db(log_id, status):
-    try:
-        supabase = init_supabase()
-        if log_id:
-            supabase.table("usage_log").update({"satisfaction": status}).eq("id", log_id).execute()
-            return True
-        return False
-    except Exception as e:
-        print(f"만족도 업데이트 에러: {e}")
-        return False
-
-# ==========================================
-# 2. 데이터 및 모델 로드
-# ==========================================
-@st.cache_resource
-def load_resources():
-    w2v = Word2Vec.load("w2v.model")
-    d2v = Doc2Vec.load("d2v.model")
-    df = pd.read_csv("final_recipe_data.csv")
-    df['재료토큰'] = df['재료토큰'].apply(literal_eval)
-    with open("stats.pkl", "rb") as f:
-        stats = pickle.load(f)
-    try:
-        price_df = pd.read_csv("price_rank.csv", encoding='utf-8-sig')
-        price_df.columns = price_df.columns.str.strip()
-        price_map = dict(zip(price_df['ingredient'], price_df['rank']))
+        with open("logic_explanation.md", "r", encoding="utf-8") as f:
+            markdown_text = f.read()
+        st.markdown("---")
+        st.markdown(markdown_text)
     except:
-        price_map = {}
+        st.error("설명 파일을 찾을 수 없습니다.")
+
+@st.dialog("☁️ 검색 트렌드 워드클라우드", width="large")
+def show_wordcloud_dialog(timeframe_text, text_data):
+    st.subheader(f"{timeframe_text} 많이 검색된 타겟 재료")
+    if not text_data:
+        st.info("데이터가 충분하지 않습니다.")
+        return
+    font_path = "font.ttf" if os.path.exists("font.ttf") else None
+    try:
+        wordcloud = WordCloud(font_path=font_path, width=800, height=400, background_color='white', colormap='viridis', random_state=42).generate(text_data)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.imshow(wordcloud, interpolation='bilinear'); ax.axis('off')
+        st.pyplot(fig)
+        if not font_path: st.caption("⚠️ 한글 폰트 파일이 없어 글자가 깨질 수 있습니다.")
+    except Exception as e: st.error(f"오류 발생: {e}")
+
+# [CALLBACK] 게시판 저장 처리
+def handle_board_submission():
+    nick = st.session_state.get("board_nick_input", "")
+    msg = st.session_state.get("board_msg_input", "")
+    if nick and msg:
+        if logic.save_board_message(nick, msg):
+            st.toast("게시글이 등록되었습니다!", icon="✅")
+            st.session_state["board_nick_input"] = ""
+            st.session_state["board_msg_input"] = ""
+        else:
+            st.toast("게시글 등록에 실패했습니다.", icon="❌")
+    else:
+        st.toast("닉네임과 내용을 모두 입력해주세요.", icon="⚠️")
+
+# [CALLBACK] 불용어 신고 처리
+def handle_stopword_submission():
+    current_input = st.session_state.get("stopword_input_field", "")
+    if current_input:
+        is_success, msg = logic.save_stopwords_to_db(current_input)
+        if is_success:
+            st.toast(msg, icon="✅")
+            st.session_state["stopword_input_field"] = ""
+        else:
+            st.toast(msg, icon="❌")
+    else:
+        st.toast("단어를 입력해주세요.", icon="⚠️")
+
+# [CALLBACK] 피드백 전송 처리 (NEW)
+def handle_feedback_submission():
+    content = st.session_state.get("feedback_input_field", "")
+    if content:
+        if logic.save_feedback_to_db(content):
+            st.toast("소중한 의견 감사합니다! 개발자가 확인 후 반영하겠습니다.", icon="✅")
+            st.balloons()
+            st.session_state["feedback_input_field"] = ""
+        else:
+            st.toast("전송 중 오류가 발생했습니다.", icon="❌")
+    else:
+        st.toast("내용을 입력해주세요.", icon="⚠️")
+
+# -------------------------------------------------------------------------
+# 3. 사이드바 UI
+# -------------------------------------------------------------------------
+with st.sidebar:
+    st.header("🎛️ 컨트롤 패널")
+    selected_mode = st.radio("모드 선택", ["📚 Ver.1 기존 레시피 DB 검색", "✨ Ver.2 나만의 재료 입력 (커스텀)"], index=0)
+    st.divider()
+    st.subheader("⚖️ 가중치 설정")
+    is_v1 = selected_mode == "📚 Ver.1 기존 레시피 DB 검색"
+    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5)
+    w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5)
+    w_method = st.slider("조리법 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1)
+    w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1)
+    if not is_v1: st.caption("💡 커스텀 모드에서는 통계 가중치가 적용되지 않습니다.")
     
-    # [수정] 불용어는 여기서 로드하지 않습니다! (캐시 문제 해결)
-    # global_stopwords_set은 각 함수 내에서 실시간으로 호출합니다.
-
-    # 전체 재료 목록 (고정 불변 데이터이므로 여기서 로드)
-    all_ingredients_set = set()
-    for ings in df['재료토큰']:
-        all_ingredients_set.update(ings)
-
-    return w2v, d2v, df, stats, price_map, all_ingredients_set
-
-# 전역 변수 로드 (불용어 변수는 제거됨)
-w2v_model, d2v_model, df, stats, price_map, all_ingredients_set = load_resources()
-
-method_map = stats["method_map"]
-recipes_by_ingredient = stats["recipes_by_ingredient"]
-ing_method_counts = stats["ing_method_counts"]
-ing_cat_counts = stats["ing_cat_counts"]
-total_method_counts = stats["total_method_counts"]
-total_cat_counts = stats["total_cat_counts"]
-TOTAL_RECIPES = stats["TOTAL_RECIPES"]
-
-# ==========================================
-# 3. 핵심 계산 로직
-# ==========================================
-def cos_sim(vec_a, vec_b):
-    norm = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
-    return max(0.0, float(np.dot(vec_a, vec_b) / norm))
-
-def get_stat_score(ingredient, target_key, ing_count_dict, total_count_dict, total_n, min_count=5):
-    cnts = ing_count_dict.get(ingredient)
-    if not cnts: return 0.0
-    ing_target_count = cnts[target_key]
-    ing_total_count = sum(cnts.values())
-    if ing_total_count < min_count: return 0.0
-    prob_ing_context = ing_target_count / ing_total_count
-    baseline_prob = total_count_dict[target_key] / total_n
-    if baseline_prob == 0: return 0.0
-    return prob_ing_context / baseline_prob
-
-def get_estimated_price_rank(ing_name, price_map):
-    if ing_name in price_map: return price_map[ing_name]
-    if any(exp in ing_name for exp in PRICE_RULE_EXCEPTIONS): return 3
-    for rank, keywords in PRICE_KEYWORD_RULES:
-        if any(kw in ing_name for kw in keywords): return rank
-    return 3
-
-# ==========================================
-# 4. 대체 추천 알고리즘 (DB 기반)
-# ==========================================
-def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
-    # ... (기존 데이터 준비 코드) ...
-    row = df[df['레시피일련번호'] == recipe_id].iloc[0]
-    current_method = row['요리방법별명']
-    current_cat = row['요리종류별명_세분화']
-    context_ings = row['재료토큰']
-    tag = f"recipe_{recipe_id}"
-    if target_ing not in w2v_model.wv: return pd.DataFrame()
-    total_weight = w_w2v + w_d2v + w_method + w_cat
-    if total_weight == 0: total_weight = 1.0
-    vec_recipe = None
-    if w_d2v > 0 and tag in d2v_model.dv: vec_recipe = d2v_model.dv[tag]
-    target_rank = get_estimated_price_rank(target_ing, price_map)
-    candidates_raw = w2v_model.wv.most_similar(target_ing, topn=50)
-    temp_results = []
-    seen_candidates = set()
+    excluded_ingredients = []
+    if not is_v1:
+        st.divider()
+        st.subheader("🚫 제외할 재료 설정")
+        all_ing_options = sorted(list(logic.all_ingredients_set))
+        excluded_ingredients = st.multiselect("제외할 재료 선택", all_ing_options, placeholder="예: 땅콩, 오이")
     
-    # [수정] 실행할 때마다 DB에서 최신 불용어를 가져옵니다.
-    global_stopwords_set = set(load_global_stopwords())
-    final_stopwords = set(user_stopwords) | global_stopwords_set
+    st.divider()
+    if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
+        show_logic_dialog()
+    
+    st.divider()
+    st.subheader("📊 인사이트 대시보드 (Beta)")
+    kst = timezone(timedelta(hours=9))
+    today_date_string = datetime.now(kst).strftime("%Y년 %m월 %d일")
+    stopwords_list = logic.load_global_stopwords()
+    
+    tab_today, tab_all = st.tabs(["📅 오늘", "📈 누적"])
+    
+    # 통계 데이터 로드
+    wc_text_today = logic.get_wordcloud_text('today')
+    wc_text_all = logic.get_wordcloud_text('all')
+    today_count, today_dishes, today_targets = logic.get_usage_stats(timeframe='today')
+    all_count, all_dishes, all_targets = logic.get_usage_stats(timeframe='all')
 
-    for cand, score_w2v in candidates_raw:
-        clean_cand = cand
-        if final_stopwords:
-            for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
-        clean_cand = clean_cand.strip()
+    with tab_today:
+        st.caption(f"기준일: {today_date_string} (KST)")
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("오늘 사용량", f"{today_count}건")
+        col_m2.metric("누적 불용어", f"{len(stopwords_list)}개")
+        if today_count > 0:
+            if st.button("☁️ 오늘의 워드클라우드", key="btn_wc_today", use_container_width=True):
+                show_wordcloud_dialog("오늘", wc_text_today)
+            st.caption("🔥 오늘 많이 대체된 재료")
+            if not today_targets.empty: st.bar_chart(today_targets, color="#FF6B6B", height=200)
+        else: st.info("오늘의 데이터가 없습니다.")
+
+    with tab_all:
+        st.caption("서비스 시작 이후 전체 데이터")
+        col_a1, col_a2 = st.columns(2)
+        col_a1.metric("총 사용량", f"{all_count}건")
+        col_a2.metric("누적 불용어", f"{len(stopwords_list)}개")
+        if all_count > 0:
+            if st.button("☁️ 누적 워드클라우드", key="btn_wc_all", use_container_width=True):
+                show_wordcloud_dialog("누적", wc_text_all)
+            st.caption("🔥 역대 많이 대체된 재료")
+            if not all_targets.empty: st.bar_chart(all_targets, color="#FF6B6B", height=200)
+        else: st.info("누적 데이터가 없습니다.")
+
+    with st.expander("📋 신고된 불용어 목록 보기"):
+        if stopwords_list: st.dataframe(pd.DataFrame(stopwords_list, columns=["불용어"]), use_container_width=True, hide_index=True)
+        else: st.info("신고된 불용어가 없습니다.")
+            
+    st.divider()
+    with st.expander("💬 익명 게시판 (Beta)", expanded=True):
+        with st.form("board_form"):
+            st.text_input("닉네임", placeholder="익명", key="board_nick_input")
+            st.text_area("내용", placeholder="자유롭게 의견을 남겨주세요", height=80, key="board_msg_input")
+            st.form_submit_button("등록", on_click=handle_board_submission)
         
-        if not clean_cand: continue
-        if clean_cand in final_stopwords: continue
+        st.markdown("---")
+        messages = logic.get_board_messages()
+        if messages:
+            for m in messages:
+                st.markdown(f"**{m['nickname']}** <span style='color:grey; font-size:0.8em;'>({m['display_time']})</span>", unsafe_allow_html=True)
+                st.text(m['content'])
+                st.divider()
+        else: st.caption("첫 번째 글을 남겨보세요!")
 
-        if clean_cand in context_ings: continue
-        if clean_cand == target_ing: continue
-        if clean_cand not in w2v_model.wv: continue
-        if clean_cand in seen_candidates: continue
-        seen_candidates.add(clean_cand)
-        real_score_w2v = w2v_model.wv.similarity(target_ing, clean_cand)
-        s_w2v = max(0.0, real_score_w2v)
-        if s_w2v < 0.35: continue
-        s_d2v = 0.0
-        if w_d2v > 0 and vec_recipe is not None:
-            rid_list = recipes_by_ingredient.get(clean_cand, [])
-            same_method_ids = [r for r in rid_list if method_map.get(r) == current_method]
-            if len(same_method_ids) > 20:
-                np.random.seed(42)
-                same_method_ids = np.random.choice(same_method_ids, 20, replace=False)
-            if same_method_ids is not None and len(same_method_ids) > 0:
-                sims = []
-                for r in same_method_ids:
-                    rt = f"recipe_{r}"
-                    if rt in d2v_model.dv: sims.append(cos_sim(vec_recipe, d2v_model.dv[rt]))
-                if sims: s_d2v = np.mean(sims)
-        s_method = 0.0 if w_method <= 0 else get_stat_score(clean_cand, current_method, ing_method_counts, total_method_counts, TOTAL_RECIPES)
-        s_cat = 0.0 if w_cat <= 0 else get_stat_score(clean_cand, current_cat, ing_cat_counts, total_cat_counts, TOTAL_RECIPES)
-        cand_rank = get_estimated_price_rank(clean_cand, price_map)
-        saving_score = target_rank - cand_rank
-        temp_results.append({"대체재료": clean_cand, "raw_W2V": s_w2v, "raw_D2V": s_d2v, "raw_Method": s_method, "raw_Category": s_cat, "saving_score": saving_score})
-    if not temp_results: return pd.DataFrame()
-    df_res = pd.DataFrame(temp_results)
-    cols = ["raw_W2V", "raw_D2V", "raw_Method", "raw_Category"]
-    norm_cols = ["W2V", "D2V", "Method", "Category"]
-    for raw_col, norm_col in zip(cols, norm_cols):
-        min_val = df_res[raw_col].min()
-        max_val = df_res[raw_col].max()
-        if max_val - min_val == 0: df_res[norm_col] = 0.5
-        else: df_res[norm_col] = (df_res[raw_col] - min_val) / (max_val - min_val)
-    df_res["최종점수"] = ((df_res["W2V"]*w_w2v) + (df_res["D2V"]*w_d2v) + (df_res["Method"]*w_method) + (df_res["Category"]*w_cat)) / total_weight
-    return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
+# -------------------------------------------------------------------------
+# 4. 메인 UI (모드별 로직)
+# -------------------------------------------------------------------------
+col_main, _ = st.columns([0.9, 0.1])
+with col_main:
+    if selected_mode == "📚 Ver.1 기존 레시피 DB 검색":
+        st.markdown("""<div style="background-color: #f0f8ff; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#0066cc;">[Ver.1] 레시피 데이터베이스에서 검색</h4><p style="margin:5px 0 0 0; font-size:14px;">학습된 12만여 개의 레시피 중 하나를 선택하여 분석합니다. 모든 통계 점수가 활용됩니다.</p></div>""", unsafe_allow_html=True)
+        search_keyword = st.text_input("🍽️ 요리명 검색 (키워드 입력 후 엔터)", placeholder="예: 된장찌개")
+        final_dish_name = None
+        if search_keyword:
+            exact_match = logic.df[logic.df['요리명'] == search_keyword]
+            exact_name = exact_match['요리명'].iloc[0] if not exact_match.empty else None
+            candidates = logic.df[logic.df['요리명'].str.contains(search_keyword, na=False, case=False)]
+            if exact_name: candidates = candidates[candidates['요리명'] != exact_name]
+            candidate_names = sorted(candidates['요리명'].unique().tolist())[:30]
+            options = []
+            if exact_name: options.append(exact_name)
+            options.extend(candidate_names)
+            if not options: st.warning(f"🔍 '{search_keyword}'가 포함된 요리명을 찾을 수 없습니다.")
+            else:
+                index_to_select = 0 if exact_name else None
+                label_msg = f"🔎 '{search_keyword}' 검색 결과 ({len(options)}개)"
+                if exact_name: label_msg += " - 정확한 요리명이 발견되었습니다!"
+                selected_option = st.selectbox(label_msg, options, index=index_to_select)
+                final_dish_name = selected_option
 
-def substitute_multi(recipe_id, targets, user_stopwords, w_w2v, w_d2v, w_method, w_cat, beam_width=3, result_topn=3):
-    row = df[df['레시피일련번호'] == recipe_id].iloc[0]
-    current_method = row['요리방법별명']
-    current_cat = row['요리종류별명_세분화']
-    initial_context = row['재료토큰']
-    tag = f"recipe_{recipe_id}"
-    vec_recipe = None
-    if w_d2v > 0 and tag in d2v_model.dv: vec_recipe = d2v_model.dv[tag]
-    total_weight = w_w2v + w_d2v + w_method + w_cat
-    if total_weight == 0: total_weight = 1.0
-    target_ranks_sum = 0
-    for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
+        if final_dish_name:
+            st.success(f"✅ 선택된 요리: **{final_dish_name}**")
+            cands = logic.df[logic.df['요리명'] == final_dish_name]
+            cands = cands.head(10).reset_index(drop=True)
+            if cands.empty: st.error("❌ 레시피 정보를 불러올 수 없습니다.")
+            else:
+                st.divider()
+                options = {}
+                for _, r in cands.iterrows():
+                    preview = ', '.join(r['재료토큰'])
+                    options[f"[{r['요리방법별명']}] {r['요리명']} (ID:{r['레시피일련번호']}) - {preview}"] = r['레시피일련번호']
+                selected_label = st.selectbox("📜 분석할 레시피를 선택하세요", list(options.keys()))
+                recipe_id = options[selected_label]
+                c1, c2 = st.columns(2)
+                with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
+                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
+                
+                if target_str:
+                    targets = [t.strip() for t in target_str.split(',') if t.strip()]
+                    stops = [s.strip() for s in stop_str.split(',') if s.strip()]
+                    current_recipe_row = logic.df[logic.df['레시피일련번호'] == recipe_id].iloc[0]
+                    recipe_ingredients = current_recipe_row['재료토큰']
+                    invalid_targets = [t for t in targets if t not in recipe_ingredients]
+
+                    if not targets: st.warning("타겟 재료를 입력해주세요.")
+                    elif invalid_targets:
+                        st.error(f"🚨 다음 재료는 선택한 레시피에 없습니다: {', '.join(invalid_targets)}")
+                        st.info("💡 팁: 레시피 미리보기에 있는 재료명을 정확히 입력해주세요.")
+                    else:
+                        st.divider()
+                        has_result = False
+                        final_recs = []
+                        if len(targets) == 1:
+                            st.subheader("🔹 단일 재료 대체 추천 (DB 기반)")
+                            t = targets[0]
+                            res = logic.substitute_single(recipe_id, t, stops, w_w2v, w_d2v, w_method, w_cat, topn=5)
+                            st.markdown(f"**{t}** 대체 결과")
+                            if not res.empty:
+                                has_result = True
+                                final_recs = res['대체재료'].head(3).tolist()
+                                d_df = res[['대체재료', '최종점수', 'saving_score']].copy()
+                                d_df['예상 원가변동'] = d_df['saving_score'].apply(lambda x: format_saving(x))
+                                d_df = d_df[['대체재료', '최종점수', '예상 원가변동']]
+                                d_df.columns = ['추천재료', '적합도', '예상 원가변동']
+                                st.dataframe(d_df.style.format("{:.1%}", subset=['적합도']).background_gradient(cmap='Greens', subset=['적합도']), use_container_width=True, hide_index=True)
+                            else: st.warning("결과 없음")
+                        elif len(targets) > 1:
+                            st.subheader("🧩 최적의 재료 조합 (DB 기반 다중 대체)")
+                            multi_res = logic.substitute_multi(recipe_id, targets, stops, w_w2v, w_d2v, w_method, w_cat)
+                            if multi_res:
+                                has_result = True
+                                final_recs = [", ".join(subs) for subs, score, saving in multi_res]
+                                m_df = pd.DataFrame([(f"{', '.join(subs)}", score, format_saving(saving, True)) for subs, score, saving in multi_res], columns=['추천 조합', '종합 점수', '예상 원가변동 합계'])
+                                st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
+                            else: st.info("조합을 찾을 수 없습니다.")
+                        
+                        if has_result:
+                            current_state = f"DB_{final_dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recs}"
+                            if 'last_log' not in st.session_state: st.session_state['last_log'] = ""
+                            if st.session_state['last_log'] != current_state:
+                                log_id = logic.save_log_to_db(final_dish_name, target_str, stops, w_w2v, w_d2v, w_method, w_cat, rec_list=final_recs, is_custom=False)
+                                st.session_state['current_log_id'] = log_id
+                                st.session_state['last_log'] = current_state
+                            if 'current_log_id' in st.session_state and st.session_state['current_log_id']:
+                                cl_id = st.session_state['current_log_id']
+                                is_voted = cl_id in st.session_state['voted_logs']
+                                st.write(""); b1, b2, _ = st.columns([0.2, 0.2, 0.6])
+                                if is_voted: b1.success("✅ 평가 완료!"); b2.write("")
+                                else:
+                                    b1.button("👍 만족해요", key="btn_sat_db", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id, "satisfy"), st.session_state['voted_logs'].add(cl_id), st.toast("감사합니다!")))
+                                    b2.button("👎 아쉬워요", key="btn_dis_db", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id, "dissatisfy"), st.session_state['voted_logs'].add(cl_id), st.toast("의견 감사합니다.")))
+
+    # =========================================
+    # [MODE 2] Ver.2 커스텀 재료 입력 모드
+    # =========================================
+    elif selected_mode == "✨ Ver.2 나만의 재료 입력 (커스텀)":
+        st.markdown("""<div style="background-color: #fff5f0; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#cc5500;">[Ver.2] 나만의 재료 리스트 입력</h4><p style="margin:5px 0 0 0; font-size:14px;">냉장고 속 재료들을 직접 입력하세요. 문맥을 실시간으로 분석하여 추천합니다. (통계 점수 제외)</p></div>""", unsafe_allow_html=True)
+        st.markdown("##### 🏷️ 요리명 입력 (참고용)")
+        search_keyword_v2 = st.text_input("키워드 입력 후 엔터 (예: 볶음밥) - 선택사항", key="v2_search")
+        custom_dish_name = search_keyword_v2
+        if search_keyword_v2:
+            exact_match_v2 = logic.df[logic.df['요리명'] == search_keyword_v2]
+            exact_name_v2 = exact_match_v2['요리명'].iloc[0] if not exact_match_v2.empty else None
+            candidates_v2 = logic.df[logic.df['요리명'].str.contains(search_keyword_v2, na=False, case=False)]
+            if exact_name_v2: candidates_v2 = candidates_v2[candidates_v2['요리명'] != exact_name_v2]
+            candidate_names_v2 = sorted(candidates_v2['요리명'].unique().tolist())[:30]
+            options_v2 = []
+            if exact_name_v2: options_v2.append(exact_name_v2)
+            options_v2.append("(직접 입력한 이름 사용)")
+            options_v2.extend(candidate_names_v2)
+            if options_v2:
+                idx_v2 = 0 if exact_name_v2 else 0
+                label_v2 = f"💡 관련 요리명 발견 ({len(options_v2)-1}개)"
+                if exact_name_v2: label_v2 += " - 정확한 요리명 발견!"
+                sel_v2 = st.selectbox(label_v2, options_v2, index=idx_v2, key="v2_select")
+                if sel_v2 != "(직접 입력한 이름 사용)": custom_dish_name = sel_v2
+        
+        st.write("")
+        context_str = st.text_area("📝 전체 재료 리스트 (쉼표로 구분)", placeholder="예: 밥, 계란, 대파, 간장, 참기름", height=100, key="v2_context")
+        if context_str:
+            context_ings_list = [ing.strip() for ing in context_str.split(',') if ing.strip()]
+            if not context_ings_list: st.warning("재료를 한 개 이상 입력해주세요.")
+            else:
+                st.caption(f"인식된 재료 ({len(context_ings_list)}개): {', '.join(context_ings_list)}")
+                c1_c, c2_c = st.columns(2)
+                with c1_c: target_str_c = st.text_input("🎯 바꿀 재료 (위 리스트 중)", placeholder="예: 계란", key="v2_target")
+                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구", placeholder="예: 약간", key="v2_stop")
+                if target_str_c:
+                    targets_c = [t.strip() for t in target_str_c.split(',') if t.strip()]
+                    stops_c = [s.strip() for s in stop_str_c.split(',') if s.strip()]
+                    invalid_targets = [t for t in targets_c if t not in context_ings_list]
+                    if invalid_targets: st.error(f"🚨 다음 재료는 전체 리스트에 없습니다: {', '.join(invalid_targets)}")
+                    elif not targets_c: st.warning("바꿀 재료를 입력해주세요.")
+                    else:
+                        st.divider()
+                        has_result_c = False
+                        final_recs_c = []
+                        if len(targets_c) == 1:
+                            st.subheader("🔹 단일 재료 대체 추천 (커스텀)")
+                            t_c = targets_c[0]
+                            res_c = logic.substitute_single_custom(t_c, context_ings_list, stops_c, w_w2v, w_d2v, excluded_ings=excluded_ingredients, topn=5)
+                            st.markdown(f"**{t_c}** 대체 결과")
+                            if not res_c.empty:
+                                has_result_c = True
+                                final_recs_c = res_c['대체재료'].head(3).tolist()
+                                d_df_c = res_c[['대체재료', '최종점수', 'saving_score']].copy()
+                                d_df_c['예상 원가변동'] = d_df_c['saving_score'].apply(lambda x: format_saving(x))
+                                d_df_c = d_df_c[['대체재료', '최종점수', '예상 원가변동']]
+                                d_df_c.columns = ['추천재료', '적합도', '예상 원가변동']
+                                st.dataframe(d_df_c.style.format("{:.1%}", subset=['적합도']).background_gradient(cmap='Greens', subset=['적합도']), use_container_width=True, hide_index=True)
+                            else: st.warning("결과 없음")
+                        elif len(targets_c) > 1:
+                            st.subheader("🧩 최적의 재료 조합 (커스텀 다중 대체)")
+                            multi_res_c = logic.substitute_multi_custom(targets_c, context_ings_list, stops_c, w_w2v, w_d2v, excluded_ings=excluded_ingredients)
+                            if multi_res_c:
+                                has_result_c = True
+                                final_recs_c = [", ".join(subs) for subs, score, saving in multi_res_c]
+                                m_df_c = pd.DataFrame([(f"{', '.join(subs)}", score, format_saving(saving, True)) for subs, score, saving in multi_res_c], columns=['추천 조합', '종합 점수', '예상 원가변동 합계'])
+                                st.dataframe(m_df_c.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
+                            else: st.info("조합을 찾을 수 없습니다.")
+                        if has_result_c:
+                            current_state_c = f"Custom_{custom_dish_name}_{target_str_c}_{stop_str_c}_{w_w2v}_{w_d2v}_{final_recs_c}"
+                            if 'last_log_c' not in st.session_state: st.session_state['last_log_c'] = ""
+                            if st.session_state['last_log_c'] != current_state_c:
+                                log_id_c = logic.save_log_to_db(custom_dish_name, target_str_c, stops_c, w_w2v, w_d2v, 0, 0, rec_list=final_recs_c, is_custom=True)
+                                st.session_state['current_log_id_c'] = log_id_c
+                                st.session_state['last_log_c'] = current_state_c
+                            if 'current_log_id_c' in st.session_state and st.session_state['current_log_id_c']:
+                                cl_id_c = st.session_state['current_log_id_c']
+                                is_voted_c = cl_id_c in st.session_state['voted_logs']
+                                st.write(""); b1_c, b2_c, _ = st.columns([0.2, 0.2, 0.6])
+                                if is_voted_c: b1_c.success("✅ 평가 완료!"); b2_c.write("")
+                                else:
+                                    b1_c.button("👍 만족해요", key="btn_sat_custom", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id_c, "satisfy"), st.session_state['voted_logs'].add(cl_id_c), st.toast("감사합니다!")))
+                                    b2_c.button("👎 아쉬워요", key="btn_dis_custom", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id_c, "dissatisfy"), st.session_state['voted_logs'].add(cl_id_c), st.toast("의견 감사합니다.")))
+        else: st.info("👆 전체 재료 리스트를 먼저 입력해주세요.")
+
+# -------------------------------------------------------------------------
+# 5. 하단 피드백 및 불용어 신고 영역
+# -------------------------------------------------------------------------
+st.divider()
+col_feedback, col_stopword = st.columns(2)
+
+with col_feedback:
+    st.subheader("📢 서비스 의견 보내기")
+    with st.form("feedback_form"):
+        st.text_area("개선할 점이나 버그가 있다면 알려주세요!", height=100, key="feedback_input_field")
+        st.form_submit_button("의견 보내기", use_container_width=True, on_click=handle_feedback_submission)
+
+with col_stopword:
+    st.subheader("🚫 불용어(이상한 단어) 신고하기")
+    st.caption("추천 결과에 이상한 단어가 있나요?", help="여러분의 신고가 모이면 추천 결과가 더 정확해집니다!")
+    st.info("💡 Tip: '간장or진간장' 같은 경우 'or'를 신고하면 '간장진간장'으로 합쳐져 추천에서 제외됩니다.")
     
-    # [수정] 실시간 로드
-    global_stopwords_set = set(load_global_stopwords())
-    final_stopwords = set(user_stopwords) | global_stopwords_set
-
-    beam = [(0.0, [], initial_context)]
-    for target_ing in targets:
-        next_beam = []
-        if target_ing not in w2v_model.wv:
-            for score, subs, ctx in beam: next_beam.append((score, subs + [target_ing], ctx))
-            beam = next_beam
-            continue
-        for path_score, path_subs, path_ctx in beam:
-            current_ctx_ing = [x for x in path_ctx if x != target_ing]
-            candidates = w2v_model.wv.most_similar(target_ing, topn=30)
-            temp_candidates = []
-            seen_candidates = set()
-            for cand, _ in candidates:
-                clean_cand = cand
-                if final_stopwords:
-                    for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
-                clean_cand = clean_cand.strip()
-
-                if not clean_cand: continue
-                if clean_cand in final_stopwords: continue
-
-                if clean_cand in current_ctx_ing or clean_cand in path_subs: continue
-                if clean_cand == target_ing: continue
-                if clean_cand not in w2v_model.wv: continue
-                if clean_cand in seen_candidates: continue
-                seen_candidates.add(clean_cand)
-                sim_orig = w2v_model.wv.similarity(target_ing, clean_cand)
-                sim_orig = max(0.0, sim_orig)
-                if sim_orig < 0.3: continue
-                harmony_scores = [w2v_model.wv.similarity(clean_cand, c) for c in current_ctx_ing if c in w2v_model.wv]
-                sim_harmony = np.mean(harmony_scores) if harmony_scores else 0.0
-                s_w2v = 0.5 * sim_orig + 0.5 * max(0.0, sim_harmony)
-                s_d2v = 0.0
-                if vec_recipe is not None:
-                    rid_list = recipes_by_ingredient.get(clean_cand, [])
-                    same_method_ids = [r for r in rid_list if method_map.get(r) == current_method]
-                    if len(same_method_ids) > 10:
-                        np.random.seed(42)
-                        same_method_ids = np.random.choice(same_method_ids, 10, replace=False)
-                    if same_method_ids is not None and len(same_method_ids) > 0:
-                        sims = []
-                        for r in same_method_ids:
-                            rt = f"recipe_{r}"
-                            if rt in d2v_model.dv: sims.append(cos_sim(vec_recipe, d2v_model.dv[rt]))
-                        if sims: s_d2v = np.mean(sims)
-                s_method = 0.0 if w_method <= 0 else get_stat_score(clean_cand, current_method, ing_method_counts, total_method_counts, TOTAL_RECIPES)
-                s_cat = 0.0 if w_cat <= 0 else get_stat_score(clean_cand, current_cat, ing_cat_counts, total_cat_counts, TOTAL_RECIPES)
-                temp_candidates.append({"cand": clean_cand, "raw_w2v": s_w2v, "raw_d2v": s_d2v, "raw_method": s_method, "raw_cat": s_cat})
-            if not temp_candidates: continue
-            df_temp = pd.DataFrame(temp_candidates)
-            cols = ["raw_w2v", "raw_d2v", "raw_method", "raw_cat"]
-            for col in cols:
-                min_val = df_temp[col].min()
-                max_val = df_temp[col].max()
-                if max_val - min_val == 0: df_temp[col + "_norm"] = 0.5
-                else: df_temp[col + "_norm"] = (df_temp[col] - min_val) / (max_val - min_val)
-            for _, r in df_temp.iterrows():
-                weighted_sum = ((r["raw_w2v_norm"]*w_w2v) + (r["raw_d2v_norm"]*w_d2v) + (r["raw_method_norm"]*w_method) + (r["raw_cat_norm"]*w_cat)) / total_weight
-                new_total_score = path_score + weighted_sum
-                new_subs = path_subs + [r["cand"]]
-                new_ctx = current_ctx_ing + [r["cand"]]
-                next_beam.append((new_total_score, new_subs, new_ctx))
-        next_beam.sort(key=lambda x: x[0], reverse=True)
-        beam = next_beam[:beam_width]
-    final_results = []
-    for score, subs, _ in beam:
-        avg_score = score / len(targets) if targets else 0.0
-        cand_ranks_sum = 0
-        for sub_ing in subs: cand_ranks_sum += get_estimated_price_rank(sub_ing, price_map)
-        total_saving_score = target_ranks_sum - cand_ranks_sum
-        final_results.append((subs, avg_score, total_saving_score))
-    return final_results[:result_topn]
-
-# ==========================================
-# 5. 커스텀 입력 기반 대체 알고리즘
-# ==========================================
-def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2v, w_d2v, excluded_ings=None, topn=10):
-    if target_ing not in w2v_model.wv: return pd.DataFrame()
-    total_weight = w_w2v + w_d2v
-    if total_weight == 0: total_weight = 1.0
-    vec_custom_context = None
-    if w_d2v > 0:
-        valid_context = [word for word in context_ings_list if word in d2v_model.wv]
-        if valid_context: vec_custom_context = d2v_model.infer_vector(valid_context)
-    target_rank = get_estimated_price_rank(target_ing, price_map)
-    candidates_raw = w2v_model.wv.most_similar(target_ing, topn=50)
-    temp_results = []
-    seen_candidates = set()
-
-    # [수정] 실시간 로드
-    global_stopwords_set = set(load_global_stopwords())
-    final_stopwords = set(user_stopwords) | global_stopwords_set
-    excluded_set = set(excluded_ings) if excluded_ings else set()
-
-    for cand, score_w2v in candidates_raw:
-        clean_cand = cand
-        if final_stopwords:
-            for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
-        clean_cand = clean_cand.strip()
-
-        if not clean_cand: continue
-        if clean_cand in final_stopwords: continue
-        if clean_cand in excluded_set: continue
-
-        if clean_cand in context_ings_list: continue
-        if clean_cand == target_ing: continue
-        if clean_cand not in w2v_model.wv: continue
-        if clean_cand in seen_candidates: continue
-        seen_candidates.add(clean_cand)
-        real_score_w2v = w2v_model.wv.similarity(target_ing, clean_cand)
-        s_w2v = max(0.0, real_score_w2v)
-        if s_w2v < 0.35: continue
-        s_d2v = 0.0
-        if w_d2v > 0 and vec_custom_context is not None:
-            rid_list = recipes_by_ingredient.get(clean_cand, [])
-            if len(rid_list) > 20:
-                np.random.seed(42)
-                rid_list = np.random.choice(rid_list, 20, replace=False)
-            if rid_list is not None and len(rid_list) > 0:
-                sims = []
-                for r in rid_list:
-                    rt = f"recipe_{r}"
-                    if rt in d2v_model.dv: sims.append(cos_sim(vec_custom_context, d2v_model.dv[rt]))
-                if sims: s_d2v = np.mean(sims)
-        s_method, s_cat = 0.0, 0.0
-        cand_rank = get_estimated_price_rank(clean_cand, price_map)
-        saving_score = target_rank - cand_rank
-        temp_results.append({"대체재료": clean_cand, "raw_W2V": s_w2v, "raw_D2V": s_d2v, "raw_Method": s_method, "raw_Category": s_cat, "saving_score": saving_score})
-    if not temp_results: return pd.DataFrame()
-    df_res = pd.DataFrame(temp_results)
-    cols = ["raw_W2V", "raw_D2V"]
-    norm_cols = ["W2V", "D2V"]
-    for raw_col, norm_col in zip(cols, norm_cols):
-        min_val = df_res[raw_col].min()
-        max_val = df_res[raw_col].max()
-        if max_val - min_val == 0: df_res[norm_col] = 0.5
-        else: df_res[norm_col] = (df_res[raw_col] - min_val) / (max_val - min_val)
-    df_res["최종점수"] = ((df_res["W2V"]*w_w2v) + (df_res["D2V"]*w_d2v)) / total_weight
-    return df_res.sort_values("최종점수", ascending=False).head(topn).reset_index(drop=True)
-
-def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w_d2v, excluded_ings=None, beam_width=3, result_topn=3):
-    total_weight = w_w2v + w_d2v
-    if total_weight == 0: total_weight = 1.0
-    vec_custom_context = None
-    if w_d2v > 0:
-        valid_context = [word for word in context_ings_list if word in d2v_model.wv]
-        if valid_context: vec_custom_context = d2v_model.infer_vector(valid_context)
-    target_ranks_sum = 0
-    for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
-    
-    # [수정] 실시간 로드
-    global_stopwords_set = set(load_global_stopwords())
-    final_stopwords = set(user_stopwords) | global_stopwords_set
-    excluded_set = set(excluded_ings) if excluded_ings else set()
-
-    beam = [(0.0, [], context_ings_list)]
-    for target_ing in targets:
-        next_beam = []
-        if target_ing not in w2v_model.wv:
-            for score, subs, ctx in beam: next_beam.append((score, subs + [target_ing], ctx))
-            beam = next_beam
-            continue
-        for path_score, path_subs, path_ctx in beam:
-            current_ctx_ing = [x for x in path_ctx if x != target_ing]
-            candidates = w2v_model.wv.most_similar(target_ing, topn=30)
-            temp_candidates = []
-            seen_candidates = set()
-            for cand, _ in candidates:
-                clean_cand = cand
-                if final_stopwords:
-                    for stop in final_stopwords: clean_cand = clean_cand.replace(stop, "")
-                clean_cand = clean_cand.strip()
-
-                if not clean_cand: continue
-                if clean_cand in final_stopwords: continue
-                if clean_cand in excluded_set: continue
-
-                if clean_cand in current_ctx_ing or clean_cand in path_subs: continue
-                if clean_cand == target_ing: continue
-                if clean_cand not in w2v_model.wv: continue
-                if clean_cand in seen_candidates: continue
-                seen_candidates.add(clean_cand)
-                sim_orig = w2v_model.wv.similarity(target_ing, clean_cand)
-                sim_orig = max(0.0, sim_orig)
-                if sim_orig < 0.3: continue
-                harmony_scores = [w2v_model.wv.similarity(clean_cand, c) for c in current_ctx_ing if c in w2v_model.wv]
-                sim_harmony = np.mean(harmony_scores) if harmony_scores else 0.0
-                s_w2v = 0.5 * sim_orig + 0.5 * max(0.0, sim_harmony)
-                s_d2v = 0.0
-                if w_d2v > 0:
-                    valid_path_ctx = [word for word in current_ctx_ing if word in d2v_model.wv]
-                    if valid_path_ctx:
-                        vec_path_context = d2v_model.infer_vector(valid_path_ctx)
-                        rid_list = recipes_by_ingredient.get(clean_cand, [])
-                        if len(rid_list) > 10:
-                            np.random.seed(42)
-                            rid_list = np.random.choice(rid_list, 10, replace=False)
-                        if rid_list is not None and len(rid_list) > 0:
-                            sims = []
-                            for r in rid_list:
-                                rt = f"recipe_{r}"
-                                if rt in d2v_model.dv: sims.append(cos_sim(vec_path_context, d2v_model.dv[rt]))
-                            if sims: s_d2v = np.mean(sims)
-                s_method, s_cat = 0.0, 0.0
-                temp_candidates.append({"cand": clean_cand, "raw_w2v": s_w2v, "raw_d2v": s_d2v})
-            if not temp_candidates: continue
-            df_temp = pd.DataFrame(temp_candidates)
-            cols = ["raw_w2v", "raw_d2v"]
-            for col in cols:
-                min_val = df_temp[col].min()
-                max_val = df_temp[col].max()
-                if max_val - min_val == 0: df_temp[col + "_norm"] = 0.5
-                else: df_temp[col + "_norm"] = (df_temp[col] - min_val) / (max_val - min_val)
-            for _, r in df_temp.iterrows():
-                weighted_sum = ((r["raw_w2v_norm"]*w_w2v) + (r["raw_d2v_norm"]*w_d2v)) / total_weight
-                new_total_score = path_score + weighted_sum
-                new_subs = path_subs + [r["cand"]]
-                new_ctx = current_ctx_ing + [r["cand"]]
-                next_beam.append((new_total_score, new_subs, new_ctx))
-        next_beam.sort(key=lambda x: x[0], reverse=True)
-        beam = next_beam[:beam_width]
-    final_results = []
-    for score, subs, _ in beam:
-        avg_score = score / len(targets) if targets else 0.0
-        cand_ranks_sum = 0
-        for sub_ing in subs: cand_ranks_sum += get_estimated_price_rank(sub_ing, price_map)
-        total_saving_score = target_ranks_sum - cand_ranks_sum
-        final_results.append((subs, avg_score, total_saving_score))
-    return final_results[:result_topn]
-
-# ==========================================
-# 6. 재료 키워드 기반 레시피 검색 (기존과 동일)
-# ==========================================
-def find_recipes_by_ingredient_keyword(keyword, topn=5):
-    keyword = keyword.strip()
-    if not keyword: return []
-    matched_dishes = set()
-    for _, row in df.iterrows():
-        for ing in row['재료토큰']:
-            if keyword in ing:
-                matched_dishes.add(row['요리명'])
-                break 
-    return list(matched_dishes)[:topn]
+    with st.form("stopword_form"):
+        st.text_input("신고할 단어 입력 (쉼표로 구분)", placeholder="예: 면포, 황석어젓, 텃밭", key="stopword_input_field")
+        st.form_submit_button("신고하기", use_container_width=True, on_click=handle_stopword_submission)
