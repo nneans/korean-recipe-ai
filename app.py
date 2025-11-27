@@ -14,7 +14,7 @@ st.title("🍳 AI 식재료 대체 추천 대시보드")
 if 'voted_logs' not in st.session_state:
     st.session_state['voted_logs'] = set()
 
-# [NEW] 불용어 입력 필드 초기화를 위한 세션 상태 설정
+# 불용어 입력 필드 초기화를 위한 세션 상태 설정
 if "stopword_input_field" not in st.session_state:
     st.session_state["stopword_input_field"] = ""
 
@@ -242,13 +242,28 @@ with col_main:
                 
                 c1, c2 = st.columns(2)
                 with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
-                with c2: stop_str = st.text_input("🚫 제거할 문구 (임시)", placeholder="약간, 시판용")
+                with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
                 
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
                     stops = [s.strip() for s in stop_str.split(',') if s.strip()]
-                    if not targets: st.warning("타겟 재료를 입력해주세요.")
+
+                    # [NEW] Ver.1 타겟 재료 유효성 검증 로직 추가
+                    # 1. 현재 선택된 레시피의 실제 재료 목록을 가져옵니다.
+                    current_recipe_row = logic.df[logic.df['레시피일련번호'] == recipe_id].iloc[0]
+                    recipe_ingredients = current_recipe_row['재료토큰'] # 이미 리스트 형태
+                    
+                    # 2. 입력된 타겟 재료 중 레시피에 없는 것이 있는지 확인합니다.
+                    invalid_targets_v1 = [t for t in targets if t not in recipe_ingredients]
+                    
+                    if not targets:
+                        st.warning("타겟 재료를 입력해주세요.")
+                    elif invalid_targets_v1:
+                        # [NEW] 유효하지 않은 재료가 있으면 에러 메시지 표시 및 로직 실행 차단
+                        st.error(f"🚨 다음 재료는 선택한 레시피에 포함되어 있지 않습니다: {', '.join(invalid_targets_v1)}")
+                        st.info("💡 팁: 레시피에 표시된 재료명을 정확히 입력해주세요. (예: '다진 마늘' -> '마늘'로 학습되었을 수 있습니다. 레시피 미리보기를 참고하세요.)")
                     else:
+                        # 모든 타겟 재료가 유효한 경우에만 로직 실행
                         st.divider()
                         final_recommendations = []
                         has_result = False
@@ -344,10 +359,17 @@ with col_main:
                 if target_str_c:
                     targets_c = [t.strip() for t in target_str_c.split(',') if t.strip()]
                     stops_c = [s.strip() for s in stop_str_c.split(',') if s.strip()]
+                    
+                    # [Ver.2는 이미 이 검증 로직이 존재하여 안전합니다]
                     invalid_targets = [t for t in targets_c if t not in context_ings_list]
-                    if invalid_targets: st.error(f"다음 재료는 전체 리스트에 없습니다: {', '.join(invalid_targets)}")
-                    elif not targets_c: st.warning("바꿀 재료를 입력해주세요.")
+                    
+                    if invalid_targets:
+                        # 유효하지 않은 재료가 있으면 에러 메시지 표시 (로직 실행 안 됨)
+                        st.error(f"🚨 다음 재료는 전체 리스트에 없습니다: {', '.join(invalid_targets)}")
+                    elif not targets_c:
+                        st.warning("바꿀 재료를 입력해주세요.")
                     else:
+                        # 모든 타겟 재료가 유효한 경우에만 로직 실행 (else 블록)
                         st.divider()
                         final_recommendations_c = []
                         has_result_c = False
@@ -391,8 +413,6 @@ with col_main:
                                     b2_c.button("👎 아쉬워요", key="btn_dis_custom", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id_c, "dissatisfy"), st.session_state['voted_logs'].add(cl_id_c), st.toast("의견 감사합니다.")))
         else: st.info("👆 전체 재료 리스트를 먼저 입력해주세요.")
 
-# app.py (하단 부분만 교체)
-
 # -------------------------------------------------------------------------
 # 4. 하단 피드백 및 불용어 신고 영역
 # -------------------------------------------------------------------------
@@ -409,21 +429,14 @@ with col_feedback:
                 if logic.save_feedback_to_db(text): st.success("의견 감사합니다!"); st.balloons()
             else: st.warning("내용을 입력해주세요.")
 
-# [NEW] 불용어 제출 처리 콜백 함수 정의
 def handle_stopword_submission():
-    # 1. 세션 상태에서 현재 입력된 값 가져오기
     current_input = st.session_state.get("stopword_input_field", "")
-    
     if current_input:
-        # 2. DB 저장 로직 실행
         is_success, msg = logic.save_stopwords_to_db(current_input)
-        
         if is_success:
-            # 성공 시 토스트 메시지 표시 및 입력창 초기화
             st.toast(msg, icon="✅")
             st.session_state["stopword_input_field"] = ""
         else:
-            # 실패 시 토스트 메시지 표시 (입력창 내용 유지)
             st.toast(msg, icon="❌")
     else:
         st.toast("단어를 입력해주세요.", icon="⚠️")
@@ -437,9 +450,5 @@ with col_stopword:
     st.info("💡 Tip: '간장or진간장' 같은 경우 'or'를 신고하면 '간장진간장'으로 합쳐져 추천에서 제외됩니다.")
     
     with st.form("stopword_form"):
-        # 입력 필드 (key 연결)
         st.text_input("신고할 단어 입력 (쉼표로 구분)", placeholder="예: 면포, 황석어젓, 텃밭", key="stopword_input_field")
-        
-        # [MODIFIED] 제출 버튼에 on_click 콜백 연결
-        # 버튼이 클릭되면 handle_stopword_submission 함수가 먼저 실행됩니다.
         st.form_submit_button("신고하기", use_container_width=True, on_click=handle_stopword_submission)
