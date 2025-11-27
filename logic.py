@@ -50,18 +50,12 @@ def load_global_stopwords():
         print(f"불용어 로드 실패: {e}")
         return []
 
-# [NEW & MODIFIED] 통계 데이터 가져오기 (기간 선택 가능)
-@st.cache_data(ttl=600) # 10분마다 갱신 (파라미터별로 따로 캐싱됨)
+@st.cache_data(ttl=600)
 def get_usage_stats(timeframe='today'):
-    """
-    로그 데이터를 분석하여 통계를 반환합니다.
-    :param timeframe: 'today' (오늘 KST 기준) 또는 'all' (전체 누적)
-    """
     try:
         supabase = init_supabase()
         query = supabase.table("usage_log").select("dish, target")
 
-        # 기간 필터링 적용
         if timeframe == 'today':
             kst = timezone(timedelta(hours=9))
             now_kst = datetime.now(kst)
@@ -69,7 +63,6 @@ def get_usage_stats(timeframe='today'):
             tomorrow_start = today_start + timedelta(days=1)
             query = query.gte("created_at", today_start.isoformat()).lt("created_at", tomorrow_start.isoformat())
         
-        # 'all'일 경우 추가 필터 없이 실행
         response = query.execute()
         data = response.data
         
@@ -79,11 +72,9 @@ def get_usage_stats(timeframe='today'):
 
         if count > 0:
             df_log = pd.DataFrame(data)
-            # 요리명 전처리
             df_log['clean_dish'] = df_log['dish'].astype(str).str.replace(r'\[Custom\]', '', regex=True).str.strip()
             top_dishes = df_log[df_log['clean_dish'] != '']['clean_dish'].value_counts().head(5)
 
-            # 타겟 재료 전처리
             all_targets = []
             for t in df_log['target']:
                 if t:
@@ -96,22 +87,48 @@ def get_usage_stats(timeframe='today'):
         print(f"통계 데이터 로드 실패 ({timeframe}): {e}")
         return 0, pd.Series(dtype=int), pd.Series(dtype=int)
 
-def save_stopword_to_db(word):
-    clean_word = word.strip()
-    if not clean_word:
-        return False, "단어를 입력해주세요."
-    try:
-        supabase = init_supabase()
-        data = {"word": clean_word}
-        supabase.table("stopwords").insert(data).execute()
+# [NEW & MODIFIED] 다중 불용어 처리 함수
+def save_stopwords_to_db(words_string):
+    """쉼표로 구분된 불용어 문자열을 받아 개별적으로 DB에 저장합니다."""
+    # 1. 쉼표 기준으로 분리 및 공백 제거
+    words = [w.strip() for w in words_string.split(',') if w.strip()]
+    
+    if not words:
+        return False, "저장할 단어가 없습니다."
+
+    supabase = init_supabase()
+    success_count = 0
+    duplicate_count = 0
+    fail_count = 0
+    
+    # 2. 각 단어별로 저장 시도
+    for word in words:
+        try:
+            data = {"word": word}
+            supabase.table("stopwords").insert(data).execute()
+            success_count += 1
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'duplicate' in error_msg or 'unique constraint' in error_msg:
+                duplicate_count += 1
+            else:
+                print(f"불용어 저장 에러 ({word}): {e}")
+                fail_count += 1
+    
+    # 3. 캐시 비우기 (성공한 게 하나라도 있으면)
+    if success_count > 0:
         st.cache_data.clear()
-        return True, f"'{clean_word}'가 불용어 DB에 추가되었습니다."
-    except Exception as e:
-        error_msg = str(e).lower()
-        if 'duplicate' in error_msg or 'unique constraint' in error_msg:
-             return False, f"'{clean_word}'는 이미 등록된 불용어입니다."
-        print(f"불용어 저장 에러: {e}")
-        return False, "저장 중 오류가 발생했습니다."
+
+    # 4. 결과 메시지 조합
+    msg_parts = []
+    if success_count > 0: msg_parts.append(f"✅ {success_count}개 저장")
+    if duplicate_count > 0: msg_parts.append(f"⚠️ {duplicate_count}개 중복")
+    if fail_count > 0: msg_parts.append(f"❌ {fail_count}개 실패")
+    
+    final_msg = ", ".join(msg_parts)
+    is_success = success_count > 0
+
+    return is_success, final_msg
 
 def save_feedback_to_db(feedback_text):
     try:
