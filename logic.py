@@ -39,7 +39,8 @@ def get_kst_now_iso():
     now_kst = datetime.now(kst_timezone)
     return now_kst.isoformat()
 
-@st.cache_data(ttl=300)
+# [중요] 불용어 로드는 데이터 갱신이 필요하므로 cache_data 사용
+@st.cache_data(ttl=60) # 1분마다 갱신 (신고 즉시 반영을 위해 짧게 설정)
 def load_global_stopwords():
     try:
         supabase = init_supabase()
@@ -124,9 +125,13 @@ def save_stopwords_to_db(words_string):
         except Exception as e:
             if 'duplicate' in str(e).lower(): duplicate_count += 1
             else: fail_count += 1
-    if success_count > 0: st.cache_data.clear()
+    
+    # [중요] 저장 후 캐시를 비워서 즉시 반영되도록 함
+    if success_count > 0:
+        st.cache_data.clear()
+        
     msg_parts = []
-    if success_count > 0: msg_parts.append(f"✅ {success_count}개 저장")
+    if success_count > 0: msg_parts.append(f"✅ {success_count}개 저장 완료")
     if duplicate_count > 0: msg_parts.append(f"⚠️ {duplicate_count}개 중복")
     if fail_count > 0: msg_parts.append(f"❌ {fail_count}개 실패")
     return success_count > 0, ", ".join(msg_parts)
@@ -217,16 +222,18 @@ def load_resources():
     except:
         price_map = {}
     
-    global_stopwords_list = load_global_stopwords()
-    global_stopwords_set = set(global_stopwords_list)
+    # [수정] 불용어는 여기서 로드하지 않습니다! (캐시 문제 해결)
+    # global_stopwords_set은 각 함수 내에서 실시간으로 호출합니다.
 
+    # 전체 재료 목록 (고정 불변 데이터이므로 여기서 로드)
     all_ingredients_set = set()
     for ings in df['재료토큰']:
         all_ingredients_set.update(ings)
 
-    return w2v, d2v, df, stats, price_map, global_stopwords_set, all_ingredients_set
+    return w2v, d2v, df, stats, price_map, all_ingredients_set
 
-w2v_model, d2v_model, df, stats, price_map, global_stopwords_set, all_ingredients_set = load_resources()
+# 전역 변수 로드 (불용어 변수는 제거됨)
+w2v_model, d2v_model, df, stats, price_map, all_ingredients_set = load_resources()
 
 method_map = stats["method_map"]
 recipes_by_ingredient = stats["recipes_by_ingredient"]
@@ -237,7 +244,7 @@ total_cat_counts = stats["total_cat_counts"]
 TOTAL_RECIPES = stats["TOTAL_RECIPES"]
 
 # ==========================================
-# 3. 핵심 계산 로직 (기존과 동일)
+# 3. 핵심 계산 로직
 # ==========================================
 def cos_sim(vec_a, vec_b):
     norm = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
@@ -265,6 +272,7 @@ def get_estimated_price_rank(ing_name, price_map):
 # 4. 대체 추천 알고리즘 (DB 기반)
 # ==========================================
 def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_method, w_cat, topn=10):
+    # ... (기존 데이터 준비 코드) ...
     row = df[df['레시피일련번호'] == recipe_id].iloc[0]
     current_method = row['요리방법별명']
     current_cat = row['요리종류별명_세분화']
@@ -280,6 +288,8 @@ def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_met
     temp_results = []
     seen_candidates = set()
     
+    # [수정] 실행할 때마다 DB에서 최신 불용어를 가져옵니다.
+    global_stopwords_set = set(load_global_stopwords())
     final_stopwords = set(user_stopwords) | global_stopwords_set
 
     for cand, score_w2v in candidates_raw:
@@ -298,7 +308,7 @@ def substitute_single(recipe_id, target_ing, user_stopwords, w_w2v, w_d2v, w_met
         seen_candidates.add(clean_cand)
         real_score_w2v = w2v_model.wv.similarity(target_ing, clean_cand)
         s_w2v = max(0.0, real_score_w2v)
-        if s_w2v < 0.3: continue
+        if s_w2v < 0.35: continue
         s_d2v = 0.0
         if w_d2v > 0 and vec_recipe is not None:
             rid_list = recipes_by_ingredient.get(clean_cand, [])
@@ -342,6 +352,8 @@ def substitute_multi(recipe_id, targets, user_stopwords, w_w2v, w_d2v, w_method,
     target_ranks_sum = 0
     for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
     
+    # [수정] 실시간 로드
+    global_stopwords_set = set(load_global_stopwords())
     final_stopwords = set(user_stopwords) | global_stopwords_set
 
     beam = [(0.0, [], initial_context)]
@@ -433,6 +445,8 @@ def substitute_single_custom(target_ing, context_ings_list, user_stopwords, w_w2
     temp_results = []
     seen_candidates = set()
 
+    # [수정] 실시간 로드
+    global_stopwords_set = set(load_global_stopwords())
     final_stopwords = set(user_stopwords) | global_stopwords_set
     excluded_set = set(excluded_ings) if excluded_ings else set()
 
@@ -492,6 +506,8 @@ def substitute_multi_custom(targets, context_ings_list, user_stopwords, w_w2v, w
     target_ranks_sum = 0
     for t in targets: target_ranks_sum += get_estimated_price_rank(t, price_map)
     
+    # [수정] 실시간 로드
+    global_stopwords_set = set(load_global_stopwords())
     final_stopwords = set(user_stopwords) | global_stopwords_set
     excluded_set = set(excluded_ings) if excluded_ings else set()
 
