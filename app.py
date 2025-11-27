@@ -16,7 +16,6 @@ st.title("🍳 AI 식재료 대체 추천 대시보드")
 if 'voted_logs' not in st.session_state:
     st.session_state['voted_logs'] = set()
 
-# 입력 필드 초기화를 위한 세션 상태들
 if "stopword_input_field" not in st.session_state:
     st.session_state["stopword_input_field"] = ""
 if "board_nick_input" not in st.session_state:
@@ -30,14 +29,26 @@ def format_saving(score, is_multi=False):
     elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
     else: return "⚪ 동일 수준"
 
+# [MODIFIED] 로직 설명 팝업창 (외부 MD 파일 읽기)
 @st.dialog("🧠 AI 추천 알고리즘 작동 원리 상세", width="large")
 def show_logic_dialog():
     if os.path.exists("flowchart.png"):
         st.image("flowchart.png", use_container_width=True)
-    st.markdown("---")
-    st.markdown("""### AI 추천 로직 상세 해부 \n(생략)""")
+    else:
+        st.warning("플로우차트 이미지(flowchart.png)를 찾을 수 없습니다.")
 
-# [MODIFIED] 워드클라우드 팝업창 (폰트 깨짐 해결 로직 추가)
+    st.markdown("---")
+
+    # [NEW] 외부 마크다운 파일 읽어서 표시
+    try:
+        with open("logic_explanation.md", "r", encoding="utf-8") as f:
+            markdown_text = f.read()
+        st.markdown(markdown_text)
+    except FileNotFoundError:
+        st.error("설명 파일(logic_explanation.md)을 찾을 수 없습니다. GitHub에 파일을 업로드해주세요.")
+    except Exception as e:
+        st.error(f"설명 파일을 읽는 중 오류가 발생했습니다: {e}")
+
 @st.dialog("☁️ 검색 트렌드 워드클라우드", width="large")
 def show_wordcloud_dialog(timeframe_text, text_data):
     st.subheader(f"{timeframe_text} 많이 검색된 타겟 재료")
@@ -46,7 +57,6 @@ def show_wordcloud_dialog(timeframe_text, text_data):
         st.info("데이터가 충분하지 않습니다.")
         return
 
-    # 프로젝트 폴더 내의 폰트 파일 우선 사용
     font_path = "font.ttf" if os.path.exists("font.ttf") else None
     
     try:
@@ -69,7 +79,6 @@ def show_wordcloud_dialog(timeframe_text, text_data):
     except Exception as e:
         st.error(f"워드클라우드 생성 중 오류 발생: {e}")
 
-# [NEW] 게시판 저장 콜백 함수
 def handle_board_submission():
     nick = st.session_state.get("board_nick_input", "")
     msg = st.session_state.get("board_msg_input", "")
@@ -77,7 +86,6 @@ def handle_board_submission():
     if nick and msg:
         if logic.save_board_message(nick, msg):
             st.toast("게시글이 등록되었습니다!", icon="✅")
-            # 입력창 초기화
             st.session_state["board_nick_input"] = ""
             st.session_state["board_msg_input"] = ""
     else:
@@ -105,10 +113,10 @@ with st.sidebar:
     st.divider()
     st.subheader("⚖️ 가중치 설정")
     is_v1 = selected_mode == "📚 Ver.1 기존 레시피 DB 검색"
-    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5)
-    w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5)
-    w_method = st.slider("조리법 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1)
-    w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1)
+    w_w2v = st.slider("맛·성질 (Word2Vec)", 0.0, 5.0, 5.0, 0.5, help="재료 자체의 의미적 유사도 비중입니다.")
+    w_d2v = st.slider("문맥 (Doc2Vec)", 0.0, 5.0, 1.0, 0.5, help="전체 재료 조합과의 어울림 비중입니다.")
+    w_method = st.slider("조리법 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
+    w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
     if not is_v1: st.caption("💡 커스텀 모드에서는 통계 가중치가 적용되지 않습니다.")
     
     excluded_ingredients = []
@@ -171,20 +179,17 @@ with st.sidebar:
         else:
             st.info("누적 데이터가 없습니다.")
 
-    # [MODIFIED] 불용어 목록 (단순 리스트)
     with st.expander("📋 신고된 불용어 목록 보기"):
         if stopwords_list:
             st.dataframe(pd.DataFrame(stopwords_list, columns=["불용어"]), use_container_width=True, hide_index=True)
         else:
             st.info("아직 신고된 불용어가 없습니다.")
             
-    # [NEW] 익명 게시판
     st.divider()
     with st.expander("💬 익명 게시판 (Beta)", expanded=True):
         with st.form("board_form"):
             st.text_input("닉네임", placeholder="익명", key="board_nick_input")
             st.text_area("내용", placeholder="자유롭게 의견을 남겨주세요", height=80, key="board_msg_input")
-            # 콜백 함수 연결
             st.form_submit_button("등록", on_click=handle_board_submission)
         
         st.markdown("---")
@@ -198,17 +203,14 @@ with st.sidebar:
             st.caption("아직 게시글이 없습니다.")
 
 # -------------------------------------------------------------------------
-# 3. 메인 UI (기존과 동일)
+# 3. 메인 UI (선택된 모드에 따라 내용 표시)
 # -------------------------------------------------------------------------
 col_main, _ = st.columns([0.9, 0.1])
 with col_main:
-    # ... (Ver.1 및 Ver.2 로직 코드 생략 - 기존과 동일하게 사용하세요) ...
-    # (지면 관계상 생략했습니다. 이전 답변의 메인 UI 코드를 그대로 쓰시면 됩니다.)
-    # 아래는 예시용으로 Ver.1의 앞부분만 표시합니다.
+    # [MODE 1] Ver.1
     if selected_mode == "📚 Ver.1 기존 레시피 DB 검색":
         st.markdown("""<div style="background-color: #f0f8ff; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#0066cc;">[Ver.1] 레시피 데이터베이스에서 검색</h4><p style="margin:5px 0 0 0; font-size:14px;">학습된 12만여 개의 레시피 중 하나를 선택하여 분석합니다. 모든 통계 점수가 활용됩니다.</p></div>""", unsafe_allow_html=True)
         search_keyword = st.text_input("🍽️ 요리명 검색 (키워드 입력 후 엔터)", placeholder="예: 된장찌개")
-        # ... (나머지 코드 계속)
         final_dish_name = None
 
         if search_keyword:
@@ -353,7 +355,7 @@ with col_main:
                 st.caption(f"인식된 재료 ({len(context_ings_list)}개): {', '.join(context_ings_list)}")
                 c1_c, c2_c = st.columns(2)
                 with c1_c: target_str_c = st.text_input("🎯 바꿀 재료 (위 리스트 중)", placeholder="예: 계란", key="v2_target")
-                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구", placeholder="예: 약간", key="v2_stop")
+                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구 (임시)", placeholder="예: 약간", key="v2_stop")
                 if target_str_c:
                     targets_c = [t.strip() for t in target_str_c.split(',') if t.strip()]
                     stops_c = [s.strip() for s in stop_str_c.split(',') if s.strip()]
@@ -404,9 +406,8 @@ with col_main:
                                     b2_c.button("👎 아쉬워요", key="btn_dis_custom", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id_c, "dissatisfy"), st.session_state['voted_logs'].add(cl_id_c), st.toast("의견 감사합니다.")))
         else: st.info("👆 전체 재료 리스트를 먼저 입력해주세요.")
 
-
 # -------------------------------------------------------------------------
-# 4. 하단 피드백 및 불용어 신고 영역 (기존과 동일)
+# 4. 하단 피드백 및 불용어 신고 영역
 # -------------------------------------------------------------------------
 st.divider()
 col_feedback, col_stopword = st.columns(2)
