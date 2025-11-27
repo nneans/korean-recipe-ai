@@ -14,6 +14,10 @@ st.title("🍳 AI 식재료 대체 추천 대시보드")
 if 'voted_logs' not in st.session_state:
     st.session_state['voted_logs'] = set()
 
+# [NEW] 불용어 입력 필드 초기화를 위한 세션 상태 설정
+if "stopword_input_field" not in st.session_state:
+    st.session_state["stopword_input_field"] = ""
+
 def format_saving(score, is_multi=False):
     prefix = "총 " if is_multi else ""
     if score > 0: return f"🟢 {prefix}+{score}단계 (절감)"
@@ -124,21 +128,17 @@ with st.sidebar:
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
     
-    # [NEW & MODIFIED] 인사이트 대시보드 (탭으로 구분)
     st.divider()
     st.subheader("📊 인사이트 대시보드 (Beta)")
     
-    # KST 기준 오늘 날짜 계산
     kst = timezone(timedelta(hours=9))
     today_date_string = datetime.now(kst).strftime("%Y년 %m월 %d일")
 
     stopwords_list = logic.load_global_stopwords()
     stopwords_count = len(stopwords_list)
 
-    # 탭 생성
     tab_today, tab_all = st.tabs(["📅 오늘", "📈 누적"])
 
-    # --- [탭 1: 오늘] ---
     with tab_today:
         st.caption(f"기준일: {today_date_string} (KST)")
         today_count, today_dishes, today_targets = logic.get_usage_stats(timeframe='today')
@@ -159,14 +159,12 @@ with st.sidebar:
         else:
             st.info("아직 오늘의 데이터가 없습니다. 첫 번째 사용자가 되어보세요! 😉")
 
-    # --- [탭 2: 누적] ---
     with tab_all:
         st.caption("서비스 시작 이후 전체 데이터")
         all_count, all_dishes, all_targets = logic.get_usage_stats(timeframe='all')
         
         col_m1_a, col_m2_a = st.columns(2)
         col_m1_a.metric("총 사용량", f"{all_count}건", help="서비스 시작 이후 누적된 총 추천 요청 횟수입니다.")
-        # 불용어 개수는 동일하므로 여기서는 생략하거나 다른 메트릭으로 대체 가능
 
         if all_count > 0:
             st.caption("🏆 역대 인기 검색어 Top 5")
@@ -180,7 +178,6 @@ with st.sidebar:
         else:
             st.info("누적 데이터가 없습니다.")
 
-    # 불용어 목록 보기 (공통)
     with st.expander("📋 신고된 불용어 목록 보기"):
         if stopwords_list:
             df_stopwords = pd.DataFrame(stopwords_list, columns=["불용어 단어"])
@@ -416,12 +413,22 @@ with col_stopword:
         "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
         help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
     )
+    # [NEW] 'or' 관련 안내 문구 추가
+    st.info("💡 Tip: '간장or진간장' 같은 경우 'or'를 신고하면 '간장진간장'으로 합쳐져 추천에서 제외됩니다.")
+    
     with st.form("stopword_form"):
-        stopword_input = st.text_input("신고할 단어 입력", placeholder="예: 약간, 머그컵으로")
+        # [MODIFIED] 입력 필드에 키 할당 및 세션 상태 값 연결
+        stopword_input = st.text_input("신고할 단어 입력 (쉼표로 구분)", placeholder="예: 면포, 황석어젓, 텃밭", key="stopword_input_field")
         submitted_stop = st.form_submit_button("신고하기", use_container_width=True)
         if submitted_stop:
             if stopword_input:
-                success, msg = logic.save_stopword_to_db(stopword_input)
-                if success: st.success(msg)
-                else: st.error(msg)
-            else: st.warning("단어를 입력해주세요.")
+                # [MODIFIED] 다중 불용어 처리 함수 호출
+                is_success, msg = logic.save_stopwords_to_db(stopword_input)
+                if is_success:
+                    st.success(msg)
+                    # [NEW] 성공 시 입력 필드 초기화 (다음 렌더링에 반영)
+                    st.session_state["stopword_input_field"] = ""
+                else:
+                    st.error(msg)
+            else:
+                st.warning("단어를 입력해주세요.")
