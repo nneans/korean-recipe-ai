@@ -19,19 +19,15 @@ def format_saving(score, is_multi=False):
     elif score < 0: return f"🔴 {prefix}{score}단계 (비쌈)"
     else: return "⚪ 동일 수준"
 
-# 팝업창 넓이를 'large'로 설정하여 가로로 넓게 만듭니다.
 @st.dialog("🧠 AI 추천 알고리즘 작동 원리 상세", width="large")
 def show_logic_dialog():
-    # 최상단에 저장된 플로우차트 이미지를 불러옵니다.
     if os.path.exists("flowchart.png"):
         st.image("flowchart.png", use_container_width=True)
     else:
-        # 이미지가 없을 경우를 대비한 예외 처리
         st.warning("플로우차트 이미지(flowchart.png)를 찾을 수 없습니다.")
 
     st.markdown("---")
 
-    # 모든 볼드체(**) 제거 및 내용 유지
     st.markdown("""
     ### AI 추천 로직 상세 해부
 
@@ -110,7 +106,7 @@ def show_logic_dialog():
     """)
 
 # -------------------------------------------------------------------------
-# 2. 사이드바 UI (모드 선택 및 가중치 설정)
+# 2. 사이드바 UI (모드 선택 및 가중치 설정 + 통계 대시보드)
 # -------------------------------------------------------------------------
 with st.sidebar:
     st.header("🎛️ 컨트롤 패널")
@@ -124,23 +120,47 @@ with st.sidebar:
     w_cat = st.slider("카테고리 통계 (Ver.1 전용)", 0.0, 5.0, 1.0, 0.5, disabled=not is_v1, help="Ver.1 모드에서만 작동합니다.")
     if not is_v1: st.caption("💡 커스텀 모드에서는 통계 가중치가 적용되지 않습니다.")
     st.divider()
-    # 버튼 이름 변경
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
     
-    # 불용어 목록 보기 기능
+    # [NEW]📊 오늘의 인사이트 (Beta) 섹션 추가
     st.divider()
-    with st.expander("📋 신고된 불용어 목록 보기"):
-        st.caption("사용자들이 신고하여 추천에서 제외된 단어들입니다.")
-        try:
-            stopwords_data = logic.load_global_stopwords()
-            if stopwords_data:
-                df_stopwords = pd.DataFrame(list(stopwords_data), columns=["불용어 단어"])
-                st.dataframe(df_stopwords, use_container_width=True, hide_index=True)
+    st.subheader("📊 오늘의 인사이트 (Beta)")
+    
+    # logic.py에서 통계 데이터와 불용어 목록 로드
+    today_count, top_dishes, top_targets = logic.get_daily_stats()
+    stopwords_list = logic.load_global_stopwords()
+    stopwords_count = len(stopwords_list)
+
+    # 1. 메트릭 표시 (오늘 사용량, 불용어 수)
+    col_m1, col_m2 = st.columns(2)
+    col_m1.metric("오늘 사용량", f"{today_count}건", help="오늘 하루 동안 발생한 재료 추천 요청 횟수입니다. (KST 0시 기준 초기화)")
+    col_m2.metric("신고된 불용어", f"{stopwords_count}개", help="사용자들이 신고하여 현재 추천에서 제외 중인 단어의 총 개수입니다.")
+
+    # 2. 인기 차트 표시 (데이터가 있을 때만)
+    if today_count > 0:
+        st.caption("🔥 오늘 가장 많이 찾은 검색어 Top 5")
+        tab_dish, tab_target = st.tabs(["요리명", "타겟 재료"])
+        with tab_dish:
+            if not top_dishes.empty:
+                st.bar_chart(top_dishes, color="#FF9F43", height=200)
             else:
-                st.info("아직 신고된 불용어가 없습니다.")
-        except Exception as e:
-            st.error(f"불용어 목록을 불러오는 중 오류가 발생했습니다: {e}")
+                st.caption("데이터가 충분하지 않습니다.")
+        with tab_target:
+            if not top_targets.empty:
+                st.bar_chart(top_targets, color="#2ECC71", height=200)
+            else:
+                st.caption("데이터가 충분하지 않습니다.")
+    else:
+        st.info("아직 오늘의 데이터가 없습니다. 첫 번째 사용자가 되어보세요! 😉")
+
+    # 3. 불용어 목록 보기 (익스팬더)
+    with st.expander("📋 신고된 불용어 목록 보기"):
+        if stopwords_list:
+            df_stopwords = pd.DataFrame(stopwords_list, columns=["불용어 단어"])
+            st.dataframe(df_stopwords, use_container_width=True, hide_index=True, height=200)
+        else:
+            st.info("아직 신고된 불용어가 없습니다.")
 
 # -------------------------------------------------------------------------
 # 3. 메인 UI (선택된 모드에 따라 내용 표시)
@@ -370,7 +390,7 @@ with col_feedback:
 
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
-    # [수정] help 인자를 사용하여 도움말 아이콘과 설명 추가
+    # help 인자를 사용하여 도움말 아이콘과 설명 추가
     st.caption(
         "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
         help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
