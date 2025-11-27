@@ -42,57 +42,59 @@ def get_kst_now_iso():
 def load_global_stopwords():
     try:
         supabase = init_supabase()
-        # 최신순으로 정렬해서 가져오기
         response = supabase.table("stopwords").select("word").order("created_at", desc=True).execute()
         if response.data:
-            return [item['word'] for item in response.data] # 리스트로 반환 (순서 유지)
+            return [item['word'] for item in response.data]
         return []
     except Exception as e:
         print(f"불용어 로드 실패: {e}")
         return []
 
-# [NEW] 오늘의 통계 데이터 가져오기
-@st.cache_data(ttl=600) # 10분마다 갱신
-def get_daily_stats():
-    """오늘(KST 기준) 쌓인 로그 데이터를 분석하여 통계를 반환합니다."""
-    kst = timezone(timedelta(hours=9))
-    now_kst = datetime.now(kst)
-    today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow_start = today_start + timedelta(days=1)
-
+# [NEW & MODIFIED] 통계 데이터 가져오기 (기간 선택 가능)
+@st.cache_data(ttl=600) # 10분마다 갱신 (파라미터별로 따로 캐싱됨)
+def get_usage_stats(timeframe='today'):
+    """
+    로그 데이터를 분석하여 통계를 반환합니다.
+    :param timeframe: 'today' (오늘 KST 기준) 또는 'all' (전체 누적)
+    """
     try:
         supabase = init_supabase()
-        # 오늘 날짜 범위의 로그 데이터 가져오기
-        response = supabase.table("usage_log")\
-            .select("dish, target")\
-            .gte("created_at", today_start.isoformat())\
-            .lt("created_at", tomorrow_start.isoformat())\
-            .execute()
+        query = supabase.table("usage_log").select("dish, target")
 
+        # 기간 필터링 적용
+        if timeframe == 'today':
+            kst = timezone(timedelta(hours=9))
+            now_kst = datetime.now(kst)
+            today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow_start = today_start + timedelta(days=1)
+            query = query.gte("created_at", today_start.isoformat()).lt("created_at", tomorrow_start.isoformat())
+        
+        # 'all'일 경우 추가 필터 없이 실행
+        response = query.execute()
         data = response.data
-        today_count = len(data)
-        top_dishes = pd.Series()
-        top_targets = pd.Series()
+        
+        count = len(data)
+        top_dishes = pd.Series(dtype=int)
+        top_targets = pd.Series(dtype=int)
 
-        if today_count > 0:
+        if count > 0:
             df_log = pd.DataFrame(data)
-            # 요리명: [Custom] 태그 제거 및 공백 정리
+            # 요리명 전처리
             df_log['clean_dish'] = df_log['dish'].astype(str).str.replace(r'\[Custom\]', '', regex=True).str.strip()
-            # 빈 문자열 제외하고 카운트
             top_dishes = df_log[df_log['clean_dish'] != '']['clean_dish'].value_counts().head(5)
 
-            # 타겟 재료: 쉼표로 구분된 재료 분리 및 공백 정리
+            # 타겟 재료 전처리
             all_targets = []
             for t in df_log['target']:
                 if t:
                     all_targets.extend([x.strip() for x in str(t).split(',') if x.strip()])
             top_targets = pd.Series(all_targets).value_counts().head(5)
 
-        return today_count, top_dishes, top_targets
+        return count, top_dishes, top_targets
 
     except Exception as e:
-        print(f"통계 데이터 로드 실패: {e}")
-        return 0, pd.Series(), pd.Series()
+        print(f"통계 데이터 로드 실패 ({timeframe}): {e}")
+        return 0, pd.Series(dtype=int), pd.Series(dtype=int)
 
 def save_stopword_to_db(word):
     clean_word = word.strip()
@@ -102,7 +104,7 @@ def save_stopword_to_db(word):
         supabase = init_supabase()
         data = {"word": clean_word}
         supabase.table("stopwords").insert(data).execute()
-        st.cache_data.clear() # 캐시 비우기
+        st.cache_data.clear()
         return True, f"'{clean_word}'가 불용어 DB에 추가되었습니다."
     except Exception as e:
         error_msg = str(e).lower()
@@ -175,7 +177,6 @@ def load_resources():
         print(f"Error reading price_rank.csv: {e}")
         price_map = {}
     
-    # 로드 시에는 set으로 변환하여 빠른 검색 지원
     global_stopwords_set = set(load_global_stopwords())
 
     return w2v, d2v, df, stats, price_map, global_stopwords_set
