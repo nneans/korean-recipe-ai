@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
 st.title("🍳 AI 식재료 대체 추천 대시보드")
 
-# 세션 상태 초기화 (입력창 값 유지 및 초기화용)
+# 세션 상태 초기화 (모든 입력 필드 및 상태값)
 if 'voted_logs' not in st.session_state: st.session_state['voted_logs'] = set()
 if "stopword_input_field" not in st.session_state: st.session_state["stopword_input_field"] = ""
 if "board_nick_input" not in st.session_state: st.session_state["board_nick_input"] = ""
@@ -21,7 +21,7 @@ if "board_msg_input" not in st.session_state: st.session_state["board_msg_input"
 if "feedback_input_field" not in st.session_state: st.session_state["feedback_input_field"] = ""
 
 # -------------------------------------------------------------------------
-# 2. 헬퍼 함수 및 콜백 함수 (알림 통일)
+# 2. 헬퍼 함수 및 콜백 함수
 # -------------------------------------------------------------------------
 def format_saving(score, is_multi=False):
     prefix = "총 " if is_multi else ""
@@ -85,7 +85,7 @@ def handle_stopword_submission():
     else:
         st.toast("단어를 입력해주세요.", icon="⚠️")
 
-# [CALLBACK] 피드백 전송 처리 (NEW)
+# [CALLBACK] 피드백 전송 처리
 def handle_feedback_submission():
     content = st.session_state.get("feedback_input_field", "")
     if content:
@@ -280,9 +280,6 @@ with col_main:
                                     b1.button("👍 만족해요", key="btn_sat_db", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id, "satisfy"), st.session_state['voted_logs'].add(cl_id), st.toast("감사합니다!")))
                                     b2.button("👎 아쉬워요", key="btn_dis_db", use_container_width=True, on_click=lambda: (logic.update_feedback_in_db(cl_id, "dissatisfy"), st.session_state['voted_logs'].add(cl_id), st.toast("의견 감사합니다.")))
 
-    # =========================================
-    # [MODE 2] Ver.2 커스텀 재료 입력 모드
-    # =========================================
     elif selected_mode == "✨ Ver.2 나만의 재료 입력 (커스텀)":
         st.markdown("""<div style="background-color: #fff5f0; padding: 15px; border-radius: 10px; margin-bottom: 20px;"><h4 style="margin:0; color:#cc5500;">[Ver.2] 나만의 재료 리스트 입력</h4><p style="margin:5px 0 0 0; font-size:14px;">냉장고 속 재료들을 직접 입력하세요. 문맥을 실시간으로 분석하여 추천합니다. (통계 점수 제외)</p></div>""", unsafe_allow_html=True)
         st.markdown("##### 🏷️ 요리명 입력 (참고용)")
@@ -323,8 +320,8 @@ with col_main:
                     elif not targets_c: st.warning("바꿀 재료를 입력해주세요.")
                     else:
                         st.divider()
-                        has_result_c = False
                         final_recs_c = []
+                        has_result_c = False
                         if len(targets_c) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (커스텀)")
                             t_c = targets_c[0]
@@ -379,7 +376,10 @@ with col_feedback:
 
 with col_stopword:
     st.subheader("🚫 불용어(이상한 단어) 신고하기")
-    st.caption("추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.", help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏")
+    st.caption(
+        "추천 결과에 이상한 단어가 있나요? 신고해주시면 다음부터 제외됩니다.",
+        help="현재 학습 데이터에 포함된 불용어가 너무 많아 일일이 수작업으로 처리하기 어렵습니다. 😥 여러분의 신고가 모이면 데이터의 품질이 높아지고 추천 결과도 더 정확해집니다. 소중한 기여 부탁드립니다! 🙏"
+    )
     st.info("💡 Tip: '간장or진간장' 같은 경우 'or'를 신고하면 '간장진간장'으로 합쳐져 추천에서 제외됩니다.")
     
     with st.form("stopword_form"):
