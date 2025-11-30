@@ -1,0 +1,2 @@
+models/d2v.model filter=lfs diff=lfs merge=lfs -text
+models/d2v.model.dv.vectors.npy filter=lfs diff=lfs merge=lfs -text
