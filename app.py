@@ -6,6 +6,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+# [NEW] 3D 시각화를 위한 라이브러리
+import plotly.express as px
+from sklearn.decomposition import PCA
+import numpy as np
 
 # -------------------------------------------------------------------------
 # 1. 페이지 기본 설정 & 세션 상태 초기화
@@ -13,7 +17,6 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="AI 한식 재료 추천", layout="wide")
 st.title("🍳 AI 식재료 대체 추천 대시보드")
 
-# 세션 상태 초기화 (모든 입력 필드 및 상태값)
 if 'voted_logs' not in st.session_state: st.session_state['voted_logs'] = set()
 if "stopword_input_field" not in st.session_state: st.session_state["stopword_input_field"] = ""
 if "board_nick_input" not in st.session_state: st.session_state["board_nick_input"] = ""
@@ -21,7 +24,7 @@ if "board_msg_input" not in st.session_state: st.session_state["board_msg_input"
 if "feedback_input_field" not in st.session_state: st.session_state["feedback_input_field"] = ""
 
 # -------------------------------------------------------------------------
-# 2. 헬퍼 함수 및 콜백 함수
+# 2. 헬퍼 함수 및 다이얼로그
 # -------------------------------------------------------------------------
 def format_saving(score, is_multi=False):
     prefix = "총 " if is_multi else ""
@@ -33,8 +36,6 @@ def format_saving(score, is_multi=False):
 def show_logic_dialog():
     if os.path.exists("flowchart.png"):
         st.image("flowchart.png", use_container_width=True)
-    
-    # 마크다운 텍스트 파일 읽기
     try:
         with open("logic_explanation.md", "r", encoding="utf-8") as f:
             markdown_text = f.read()
@@ -58,7 +59,59 @@ def show_wordcloud_dialog(timeframe_text, text_data):
         if not font_path: st.caption("⚠️ 한글 폰트 파일이 없어 글자가 깨질 수 있습니다.")
     except Exception as e: st.error(f"오류 발생: {e}")
 
-# [CALLBACK] 게시판 저장 처리
+# [NEW] 3D 벡터 공간 시각화 팝업
+@st.dialog("🌌 재료 벡터 공간 (3D Visualization)", width="large")
+def show_3d_space_dialog():
+    st.caption("AI가 학습한 재료들의 관계를 3차원 공간에서 확인해보세요. (상위 300개 재료)")
+    
+    try:
+        # logic.py에서 로드된 Word2Vec 모델 가져오기
+        model = logic.w2v_model
+        
+        # 빈도수 상위 300개 단어 추출
+        words = model.wv.index_to_key[:300]
+        vectors = np.array([model.wv[word] for word in words])
+        
+        # PCA로 100차원 -> 3차원 축소
+        pca = PCA(n_components=3)
+        projections = pca.fit_transform(vectors)
+        
+        # 데이터프레임 생성
+        df_vis = pd.DataFrame(projections, columns=['x', 'y', 'z'])
+        df_vis['word'] = words
+        
+        # Plotly 3D 산점도 그리기
+        fig = px.scatter_3d(
+            df_vis, x='x', y='y', z='z',
+            text='word',
+            hover_name='word',
+            color='z', # 높이에 따라 색상 변화
+            color_continuous_scale='Viridis'
+        )
+        
+        fig.update_traces(
+            marker=dict(size=4, opacity=0.8),
+            textposition='top center',
+            textfont=dict(size=10, color='black') # 텍스트 스타일
+        )
+        
+        fig.update_layout(
+            height=600,
+            scene=dict(
+                xaxis=dict(showticklabels=False, title=''),
+                yaxis=dict(showticklabels=False, title=''),
+                zaxis=dict(showticklabels=False, title='')
+            ),
+            margin=dict(l=0, r=0, b=0, t=0)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        st.info("💡 **팁:** 마우스로 드래그하여 회전하거나 휠로 확대/축소할 수 있습니다. 가까이 있는 재료들은 AI가 '비슷한 성질'로 인식한 것입니다.")
+        
+    except Exception as e:
+        st.error(f"시각화 생성 실패: {e}")
+
+# [CALLBACK] 함수들
 def handle_board_submission():
     nick = st.session_state.get("board_nick_input", "")
     msg = st.session_state.get("board_msg_input", "")
@@ -67,12 +120,9 @@ def handle_board_submission():
             st.toast("게시글이 등록되었습니다!", icon="✅")
             st.session_state["board_nick_input"] = ""
             st.session_state["board_msg_input"] = ""
-        else:
-            st.toast("게시글 등록에 실패했습니다.", icon="❌")
-    else:
-        st.toast("닉네임과 내용을 모두 입력해주세요.", icon="⚠️")
+        else: st.toast("게시글 등록에 실패했습니다.", icon="❌")
+    else: st.toast("닉네임과 내용을 모두 입력해주세요.", icon="⚠️")
 
-# [CALLBACK] 불용어 신고 처리
 def handle_stopword_submission():
     current_input = st.session_state.get("stopword_input_field", "")
     if current_input:
@@ -80,23 +130,18 @@ def handle_stopword_submission():
         if is_success:
             st.toast(msg, icon="✅")
             st.session_state["stopword_input_field"] = ""
-        else:
-            st.toast(msg, icon="❌")
-    else:
-        st.toast("단어를 입력해주세요.", icon="⚠️")
+        else: st.toast(msg, icon="❌")
+    else: st.toast("단어를 입력해주세요.", icon="⚠️")
 
-# [CALLBACK] 피드백 전송 처리
 def handle_feedback_submission():
     content = st.session_state.get("feedback_input_field", "")
     if content:
         if logic.save_feedback_to_db(content):
-            st.toast("소중한 의견 감사합니다! 개발자가 확인 후 반영하겠습니다.", icon="✅")
+            st.toast("의견 감사합니다!", icon="✅")
             st.balloons()
             st.session_state["feedback_input_field"] = ""
-        else:
-            st.toast("전송 중 오류가 발생했습니다.", icon="❌")
-    else:
-        st.toast("내용을 입력해주세요.", icon="⚠️")
+        else: st.toast("전송 실패", icon="❌")
+    else: st.toast("내용을 입력해주세요.", icon="⚠️")
 
 # -------------------------------------------------------------------------
 # 3. 사이드바 UI
@@ -121,6 +166,10 @@ with st.sidebar:
         excluded_ingredients = st.multiselect("제외할 재료 선택", all_ing_options, placeholder="예: 땅콩, 오이")
     
     st.divider()
+    # [NEW] 3D 시각화 버튼 추가
+    if st.button("🌌 재료 우주(3D) 탐험하기", use_container_width=True):
+        show_3d_space_dialog()
+        
     if st.button("🤔 어떤 과정을 거쳐 재료가 추천되나요?", use_container_width=True):
         show_logic_dialog()
     
@@ -132,7 +181,6 @@ with st.sidebar:
     
     tab_today, tab_all = st.tabs(["📅 오늘", "📈 누적"])
     
-    # 통계 데이터 로드
     wc_text_today = logic.get_wordcloud_text('today')
     wc_text_all = logic.get_wordcloud_text('all')
     today_count, today_dishes, today_targets = logic.get_usage_stats(timeframe='today')
@@ -183,7 +231,7 @@ with st.sidebar:
         else: st.caption("첫 번째 글을 남겨보세요!")
 
 # -------------------------------------------------------------------------
-# 4. 메인 UI (모드별 로직)
+# 4. 메인 UI (기존과 동일)
 # -------------------------------------------------------------------------
 col_main, _ = st.columns([0.9, 0.1])
 with col_main:
@@ -207,7 +255,6 @@ with col_main:
                 if exact_name: label_msg += " - 정확한 요리명이 발견되었습니다!"
                 selected_option = st.selectbox(label_msg, options, index=index_to_select)
                 final_dish_name = selected_option
-
         if final_dish_name:
             st.success(f"✅ 선택된 요리: **{final_dish_name}**")
             cands = logic.df[logic.df['요리명'] == final_dish_name]
@@ -224,14 +271,12 @@ with col_main:
                 c1, c2 = st.columns(2)
                 with c1: target_str = st.text_input("🎯 바꿀 재료", placeholder="돼지고기, 양파")
                 with c2: stop_str = st.text_input("🚫 제거할 문구", placeholder="약간, 시판용")
-                
                 if target_str:
                     targets = [t.strip() for t in target_str.split(',') if t.strip()]
                     stops = [s.strip() for s in stop_str.split(',') if s.strip()]
                     current_recipe_row = logic.df[logic.df['레시피일련번호'] == recipe_id].iloc[0]
                     recipe_ingredients = current_recipe_row['재료토큰']
                     invalid_targets = [t for t in targets if t not in recipe_ingredients]
-
                     if not targets: st.warning("타겟 재료를 입력해주세요.")
                     elif invalid_targets:
                         st.error(f"🚨 다음 재료는 선택한 레시피에 없습니다: {', '.join(invalid_targets)}")
@@ -263,7 +308,6 @@ with col_main:
                                 m_df = pd.DataFrame([(f"{', '.join(subs)}", score, format_saving(saving, True)) for subs, score, saving in multi_res], columns=['추천 조합', '종합 점수', '예상 원가변동 합계'])
                                 st.dataframe(m_df.style.format("{:.1%}", subset=['종합 점수']).background_gradient(cmap='Blues', subset=['종합 점수']), use_container_width=True, hide_index=True)
                             else: st.info("조합을 찾을 수 없습니다.")
-                        
                         if has_result:
                             current_state = f"DB_{final_dish_name}_{target_str}_{stop_str}_{w_w2v}_{w_d2v}_{w_method}_{w_cat}_{final_recs}"
                             if 'last_log' not in st.session_state: st.session_state['last_log'] = ""
@@ -311,7 +355,7 @@ with col_main:
                 st.caption(f"인식된 재료 ({len(context_ings_list)}개): {', '.join(context_ings_list)}")
                 c1_c, c2_c = st.columns(2)
                 with c1_c: target_str_c = st.text_input("🎯 바꿀 재료 (위 리스트 중)", placeholder="예: 계란", key="v2_target")
-                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구", placeholder="예: 약간", key="v2_stop")
+                with c2_c: stop_str_c = st.text_input("🚫 제거할 문구 (임시)", placeholder="예: 약간", key="v2_stop")
                 if target_str_c:
                     targets_c = [t.strip() for t in target_str_c.split(',') if t.strip()]
                     stops_c = [s.strip() for s in stop_str_c.split(',') if s.strip()]
@@ -320,8 +364,8 @@ with col_main:
                     elif not targets_c: st.warning("바꿀 재료를 입력해주세요.")
                     else:
                         st.divider()
-                        final_recs_c = []
                         has_result_c = False
+                        final_recs_c = []
                         if len(targets_c) == 1:
                             st.subheader("🔹 단일 재료 대체 추천 (커스텀)")
                             t_c = targets_c[0]
@@ -371,7 +415,7 @@ col_feedback, col_stopword = st.columns(2)
 with col_feedback:
     st.subheader("📢 서비스 의견 보내기")
     with st.form("feedback_form"):
-        st.text_area("개선할 점이나 버그가 있다면 알려주세요!", height=100, key="feedback_input_field")
+        text = st.text_area("개선할 점이나 버그가 있다면 알려주세요!", height=100, key="feedback_input_field")
         st.form_submit_button("의견 보내기", use_container_width=True, on_click=handle_feedback_submission)
 
 with col_stopword:
